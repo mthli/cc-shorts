@@ -58,6 +58,12 @@ let isBlitting = false
 let lastDeny = ''
 /** Bumped by every action that changes what plays; stale work checks it. */
 let epoch = 0
+/**
+ * Frame files are counted per load, so the load's start goes in their names
+ * too: a reload counts from 1 again, and ffmpeg will not write over a file
+ * the last load left behind.
+ */
+const loadMark = Date.now().toString(36)
 let frameSeq = 0
 let generation = 0
 /** The box the pane last drew the picture in, from the render hook. */
@@ -306,13 +312,14 @@ async function start($: EngineInterface, short: Short, from: number, my: number)
   const mode = s.mode ?? 'image'
   const box = layout ?? videoBox(50, 40)
   await $.process.run(['mkdir', '-p', dir])
-  const frame: Frame = { file: `${dir}/frame-${++frameSeq}.rgb`, ...frameSize(mode, box), ...box }
+  const name = `frame-${loadMark}-${++frameSeq}.rgb`
+  const frame: Frame = { file: `${dir}/${name}`, ...frameSize(mode, box), ...box }
   const argv = ffmpegArgs({ path: short.path ?? '', start: from, mode, frame, isMuted: s.muted || !short.hasAudio })
   const p: Player = { id: short.id, stream: $.process.spawn({ argv }), mode, frame, start: from, pos: from, stderr: '' }
   player = p
   // Every older frame file: the one shown while paused, and any an ffmpeg
   // still dying wrote after it was stopped.
-  void $.process.run(['find', dir, '-name', 'frame-*', '!', '-name', `frame-${frameSeq}.rgb*`, '-delete'])
+  void $.process.run(['find', dir, '-name', 'frame-*', '!', '-name', `${name}*`, '-delete'])
   lastSource = undefined
   lastCells = undefined
   await setShorts($, s => ({ ...s, status: 'playing', message: '', pos: from, frame }))
