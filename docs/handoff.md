@@ -40,6 +40,7 @@ Capabilities and limits that matter to this project:
 - **`$.audio.play`**: takes `{ asset }`, `{ url }` or `{ base64, mime }`; on macOS it plays through `afplay` and **cannot start from a given position**; `shouldLoop` plus `signal` loops or stops playback partway. v1 does not use it: ffmpeg outputs the sound directly.
 - **`$.clock.every / after / sleep`**: timers. A hot reload of the mod cancels every timer.
 - **`$.store`** keeps data across sessions; **`$.state`** lasts only for the current session, **survives a hot reload**, and needs its type declared in `types/index.d.ts`. The module's own variables are reset by a hot reload.
+- **`/clear`** (tested on 2.1.287 with a probe mod): it fires `session.end` with `reason: 'clear'` and **no `session.start` after it**; the session id changes and **the host empties `$.state`**. The process goes on, so the open pane, the registered `/shorts`, the module's variables, `$.clock` timers and `$.process.spawn` children all carry on. `classic.SessionStart` with `source: 'clear'` fires once the new session is in place, `$.state` already empty; a write there sticks.
 - **`ui.close`**: a close by the user (ctrl+x x, the pane's close mark) fires the plugin's `ui.close` hook; **a `$.ui.close` the plugin calls itself does not fire its own hook** (the log says `skipped: re-entry`), so the plugin must clean up before it closes the pane itself.
 - **A Button's `hotkey`** can only be a single digit or a single lowercase letter, and it works only while the pane has focus (`ctrl+x tab` or a mouse click; passing `focus: true` to `$.ui.open` gives it focus as it opens).
 - **CLI terminal only**: `$.process`, `Image` and `Raster` are all unavailable in the desktop app's Code tab.
@@ -129,14 +130,16 @@ How it works:
    - Cleaning up means: stop ffmpeg and the timers, set the status back to idle, and delete the whole session temp directory. The queue, current position and mute setting stay, so the next `/shorts` carries on with the current Short from where it was closed.
    - Hot reload: the engine stops the old module's ffmpeg and timers itself. In `session.start`, if the pane is still open and was playing, it resumes from the noted position; if it is paused in Raster mode, it rebuilds the blocks from the paused frame's file and redraws (the blocks on screen live in a module variable, gone after a reload); if the pane is closed, it cleans up.
    - Session end: stop ffmpeg and delete the temp directory.
+   - `/clear`: not a session end for the player. `session.end` keeps a copy of `$.state` in a module variable and stops nothing; `classic.SessionStart` (`source: 'clear'`) writes it back, so the Short goes on playing in the same ffmpeg, with the same queue and temp directory.
    - Every `session.start` also deletes directories under `$TMPDIR/cc-shorts/` untouched for more than a day (left behind by sessions that crashed).
 
 ## Verification
 
 Verified (2026-10-02):
 
-- 15 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
+- 16 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
 - **End to end**: ran the whole flow in a Claude Code with `--plugin-dir` inside tmux. tmux does not support image protocols, which happens to cover "Image refused → fall back to Raster": the picture was real color frames, the progress moved, and the next Short played when one ended. `j`/`k`/`p`/`m`/`x` were all pressed; resuming after a pause picked up at the right position; during playback there was always exactly 1 frame file and 3–4 mp4s; `watched` was called after 10 seconds of watching; after `x` and after a hot reload, ffmpeg was confirmed killed and the temp directory deleted. The screen was read with `tmux capture-pane -p` (add `-e` to see colors), and the plugin log with `--debug-file`.
+- **`/clear` mid-Short** (in tmux): the same ffmpeg played on and the progress kept moving through the `/clear`; when the Short ended the next one in the queue started on its own; after `/exit`, ffmpeg was gone and the temp directory deleted. `tests/pane.test.tsx` covers the copy and its one-time restore.
 - After trying it, the user said it "works well", but which terminal it was tried in and what exactly was checked were not recorded item by item.
 
 Status of the original "verify first while implementing" points:

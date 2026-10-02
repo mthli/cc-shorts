@@ -71,6 +71,8 @@ let downloadChain: Promise<unknown> = Promise.resolve()
 let failures = 0
 const downloads = new Map<string, Promise<Short | undefined>>()
 const marked = new Set<string>()
+/** What `shorts` held when a /clear began, for the session after it. */
+let carried: Shorts | undefined
 
 const log = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 const setShorts = ($: EngineInterface, change: (s: Shorts) => Shorts) => update($, shorts, change)
@@ -179,16 +181,18 @@ export const register: Register = on => {
           {notes || ' '}
         </Text>
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button plain hotkey="k" label="Previous" onPress={() => void skip($, -1)} />
+          <Button key="previous" plain hotkey="k" label="Previous" onPress={() => void skip($, -1)} />
           <Button
+            key="pause"
             plain
             hotkey="p"
             label={s.status === 'paused' ? 'Play' : 'Pause'}
             onPress={() => void togglePause($)}
           />
-          <Button plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
-          <Button plain hotkey="m" label={s.muted ? 'Unmute' : 'Mute'} onPress={() => void toggleMute($)} />
+          <Button key="next" plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
+          <Button key="mute" plain hotkey="m" label={s.muted ? 'Unmute' : 'Mute'} onPress={() => void toggleMute($)} />
           <Button
+            key="close"
             plain
             hotkey="x"
             label="Close"
@@ -207,9 +211,24 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      // A /clear ends the conversation, not the process: the pane, the ffmpeg
+      // and the timers carry on, but the host empties `$.state` and fires no
+      // `session.start`. Keep what plays for `classic.SessionStart` to put back.
+      carried = await read($, shorts)
+      return next(e)
+    }
     epoch++
     stopPlayer()
     if (dir !== '') await $.process.run(['rm', '-rf', dir], { timeoutMs: 2000 }).catch(() => undefined)
+    return next(e)
+  })
+
+  // Fires once the session a /clear starts is in place, `$.state` already empty.
+  on('classic.SessionStart', async ($, e, next) => {
+    const kept = carried
+    carried = undefined
+    if (e.source === 'clear' && kept !== undefined) await setShorts($, () => kept)
     return next(e)
   })
 }
