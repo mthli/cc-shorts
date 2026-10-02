@@ -1,12 +1,12 @@
 # feed Map
 > Static understanding snapshot, not a decision history.
-> See `.claude/decisions/feed.md` for the paired decision history (not created yet; the `MODULE: feed`
-> Decision blocks live only in commit messages so far).
+> See `.claude/decisions/feed.md` for the paired decision history.
 > Verified: 2026-10-02 (3 research concerns; 10 claims checked against helper/yt.py and the installed
 > yt-dlp 2026.8.19 source by an independent verifier: 7 confirmed, 3 partial and corrected, 0 refuted)
 > Maintained: 2026-10-03 (targeted verification: `ydl` reports a refused Keychain as a cookie
 > failure, and `MAX_BATCHES` is shared by every scroll of one `feed` call. Checked by an offline
-> script that stubs yt-dlp's cookie reader.)
+> script that stubs yt-dlp's cookie reader. The research probe is gone from the tree; its findings
+> stay in `docs/research.md`.)
 
 ## Responsibilities
 
@@ -171,7 +171,8 @@ Failure contract:
   - Firefox uses its profiles.
 - **Outbound: tools on PATH.** ffmpeg merges `bv*+ba`. deno is optional and is yt-dlp's default
   runtime for YouTube's JS challenges.
-- **Related:** `docs/probe_reel.py` is the research ancestor of `Api` and `Feed`. Nothing imports it.
+- **Related:** `docs/research.md` records the probe that found the reel sequence, the research
+  ancestor of `Api` and `Feed`. The probe script itself is only in git history (`cc938de`).
 
 ## Invariants and gotchas
 

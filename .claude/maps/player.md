@@ -1,13 +1,12 @@
 # player Map
 > Static understanding snapshot, not a decision history.
-> See `.claude/decisions/player.md` for the paired decision history (not created yet; the
-> `MODULE: player` Decision blocks live only in commit messages so far).
+> See `.claude/decisions/player.md` for the paired decision history.
 > Verified: 2026-10-02 (5 research concerns; 29 claims checked by 3 independent verifiers:
 > 20 confirmed, 9 partial and corrected, 0 refuted; 4 bugs confirmed)
 > Maintained: 2026-10-03 (targeted verification: the confirmed bugs are fixed and covered by pane
 > tests. `start` and `play` write only while their epoch is current. `pause` holds back a Short still
 > on its way. `session.start` gives the input source back after the setup check. `dir` lives in
-> `shorts` once a `/clear` has passed.)
+> `shorts` once a `/clear` has passed. The host findings it cites now live in `docs/research.md`.)
 
 ## Responsibilities
 
@@ -473,8 +472,8 @@ The first load and every hot reload run this. A `/clear` does not.
 - `↗` is ambiguous-width in some terminals.
 - Hotkeys fire only while the plugin's pane holds focus, and they are lowercased, so Shift+J is `j`.
 - No Button is ever disabled. Keys that do not apply in a status are no-ops.
-- Image mode makes the terminal re-read the whole frame file on every tick (about 850 KB per frame
-  under Ghostty, per the handoff).
+- Image mode makes the terminal re-read the whole frame file on every tick (about 850 KB for a
+  40-column picture, per `docs/research.md`).
 
 **Input source and cleanup**
 
@@ -492,9 +491,9 @@ The first load and every hot reload run this. A `/clear` does not.
 ## Open questions
 
 - Does the plugin's own `$.ui.close` from `x` reach its own `ui.close` hook? The code comment's "no"
-  rests on a probe recorded in the handoff (`skipped: re-entry`). The host types only say that every
-  close raises `ui.close`, and that the calling hook is skipped. If the hook does run, `shutDown` runs
-  twice, which is harmless.
+  rests on a probe recorded in `docs/research.md` (`skipped: re-entry`). The host types only say that
+  every close raises `ui.close`, and that the calling hook is skipped. If the hook does run,
+  `shutDown` runs twice, which is harmless.
 - Is it intended that `session.end` for `resume` or `logout` stops playback without setting `idle` or
   closing the pane?
 - Should `/shorts <name>` pick a browser directly, given the `[browser]` argument hint?
@@ -506,7 +505,7 @@ The first load and every hot reload run this. A `/clear` does not.
 
 ## To verify
 
-- Host behavior asserted only by comments, the handoff, or commit notes:
+- Host behavior asserted only by comments, `docs/research.md`, or commit notes:
   - `/clear` empties `$.state`, and `classic.SessionStart` fires after the wipe.
   - `$.plugin.root` is the repo root, not `.claude-plugin/`.
 - ffmpeg and terminal behavior:

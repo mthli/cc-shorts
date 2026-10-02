@@ -90,9 +90,11 @@ claude plugin test .                              # tests
 claude plugin validate .claude-plugin/plugin.json # the plugin and its hooks module
 claude plugin validate .                          # the marketplace: with marketplace.json here, `.` checks only that
 bunx -p typescript tsc -p . --noEmit              # types; .claude-plugin/types/ appears once Claude Code has loaded the plugin
+bunx prettier@3 --write hooks tests types         # format TypeScript (.prettierrc.json)
+uvx ruff format helper                            # format Python (ruff.toml)
 ```
 
-`claude --plugin-dir .` reloads the plugin on every save. [`docs/handoff.md`](docs/handoff.md) has the design, the research behind it and what is verified so far.
+`claude --plugin-dir .` reloads the plugin on every save. [`docs/research.md`](docs/research.md) has the product decisions, the research behind them and what is verified so far; how the code works is in `.claude/maps/`.
 
 ## License
 
