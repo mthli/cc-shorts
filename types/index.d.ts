@@ -55,6 +55,11 @@ export type Shorts = {
    * keyboard, put back when it lets go; absent when it switched nothing.
    */
   inputSource?: string
+  /**
+   * The folder downloads and frames go in, once a /clear has passed: it keeps
+   * the id of the session before, and a reload must not take the new one.
+   */
+  dir?: string
 }
 
 declare module 'claude-code' {

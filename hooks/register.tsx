@@ -121,6 +121,9 @@ let likeChain: Promise<unknown> = Promise.resolve()
 
 const log = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 const setShorts = ($: EngineInterface, change: (s: Shorts) => Shorts) => update($, shorts, change)
+/** `setShorts` for the play begun at `my`: after a newer action, even a retried write leaves the state alone. */
+const setShortsAt = ($: EngineInterface, my: number, change: (s: Shorts) => Shorts) =>
+  setShorts($, s => (my === epoch ? change(s) : s))
 
 type HelperReply<T> = { value: T; error?: undefined } | { value?: undefined; error: string }
 
@@ -164,11 +167,14 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
-    dir = `${tmp}/cc-shorts/${await $.session.id()}`
+    // A /clear keeps the folder of the session before it, and says so in
+    // `shorts` for a reload after it to find.
+    dir = (await read($, shorts)).dir ?? `${tmp}/cc-shorts/${await $.session.id()}`
     const chosen = await $.store.get('browser').catch(() => undefined)
     browser = typeof chosen === 'string' ? chosen : ''
     // Unawaited: the first prompt waits for this hook, and a helper waits for the check.
-    void checkSetup($).then(missing => {
+    const check = checkSetup($)
+    void check.then(missing => {
       const toast = setupToast(missing)
       if (toast !== undefined) $.ui.toast(toast, { timeoutMs: 10_000 })
     })
@@ -187,8 +193,10 @@ export const register: Register = on => {
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     const s = await read($, shorts)
     // A source still kept means the last load switched it and never gave it back.
+    // No draw comes to a closed pane: it goes back once the check has named
+    // the helper's Python.
     hadKeys = s.inputSource !== undefined
-    if (!isOpen) void holdKeys($, false)
+    if (!isOpen) void check.then(() => holdKeys($, false))
     if (isOpen && (s.status === 'playing' || s.status === 'loading')) void play($, s.pos)
     else if (isOpen && s.status === 'paused' && s.mode === 'raster' && s.frame) {
       // The cells on screen went with the old module; the paused frame's
@@ -339,7 +347,7 @@ export const register: Register = on => {
   on('classic.SessionStart', async ($, e, next) => {
     const kept = carried
     carried = undefined
-    if (e.source === 'clear' && kept !== undefined) await setShorts($, () => kept)
+    if (e.source === 'clear' && kept !== undefined) await setShorts($, () => ({ ...kept, dir }))
     return next(e)
   })
 }
@@ -449,20 +457,20 @@ async function play($: EngineInterface, from = 0) {
   stopPlayer()
   let s = await read($, shorts)
   if (s.queue.length <= s.cur) {
-    await setShorts($, s => ({ ...s, status: 'loading', message: 'Fetching the feed…' }))
+    await setShortsAt($, my, s => ({ ...s, status: 'loading', message: 'Fetching the feed…' }))
     const error = await refill($)
     if (my !== epoch) return
     s = await read($, shorts)
     if (s.queue.length <= s.cur) {
       const why = error === undefined ? '' : ` (${error})`
       const message = `Could not get the feed${why}. j retries; /shorts browser switches browser`
-      await setShorts($, s => ({ ...s, status: 'error', message }))
+      await setShortsAt($, my, s => ({ ...s, status: 'error', message }))
       return
     }
   }
   const id = s.queue[s.cur] ?? ''
   if (s.shorts[id]?.path === undefined) {
-    await setShorts($, s => ({ ...s, status: 'loading', message: 'Downloading…' }))
+    await setShortsAt($, my, s => ({ ...s, status: 'loading', message: 'Downloading…' }))
   }
   // Skipped on from already: what plays now goes first, not this one.
   if (my !== epoch) return
@@ -474,7 +482,7 @@ async function play($: EngineInterface, from = 0) {
   if (short?.path === undefined) {
     if (++failures >= 3) {
       failures = 0
-      await setShorts($, s => ({
+      await setShortsAt($, my, s => ({
         ...s,
         status: 'error',
         message: 'Downloads keep failing; check the network, then press j to retry',
@@ -482,7 +490,8 @@ async function play($: EngineInterface, from = 0) {
       return
     }
     $.ui.toast('cc-shorts: download failed, skipping to the next one')
-    await setShorts($, s => ({ ...s, cur: s.cur + 1, pos: 0 }))
+    await setShortsAt($, my, s => ({ ...s, cur: s.cur + 1, pos: 0 }))
+    if (my !== epoch) return
     return play($)
   }
   failures = 0
@@ -513,7 +522,7 @@ async function start($: EngineInterface, short: Short, from: number, my: number)
   lastCells = undefined
   // Stopped while this writes: a retried write would draw over the newer one,
   // and the ticker would outlive the stop that already ran.
-  await setShorts($, s => (my === epoch ? { ...s, status: 'playing', message: '', pos: from, frame } : s))
+  await setShortsAt($, my, s => ({ ...s, status: 'playing', message: '', pos: from, frame }))
   if (my !== epoch) return
   void markSeen($, short.id)
   ticker = $.clock.every(33, () => void tick($))
@@ -783,10 +792,21 @@ async function togglePause($: EngineInterface) {
 
 async function pause($: EngineInterface) {
   const p = player
-  if (p === undefined) return
+  if (p !== undefined) {
+    epoch++
+    stopPlayer()
+    await setShorts($, s => ({ ...s, status: 'paused', pos: p.pos }))
+    return
+  }
+  // Nothing on screen yet, but one on its way (the feed, its download, ffmpeg
+  // starting): a newer epoch keeps it from starting, and the pane drops the
+  // frame of the Short before.
+  const { status } = await read($, shorts)
+  if (status !== 'loading' && status !== 'playing') return
+  // Started while this read: paused as any other.
+  if (player !== undefined) return pause($)
   epoch++
-  stopPlayer()
-  await setShorts($, s => ({ ...s, status: 'paused', pos: p.pos }))
+  await setShorts($, s => ({ ...s, status: 'paused', message: 'Paused', frame: undefined }))
 }
 
 /**

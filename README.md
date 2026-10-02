@@ -77,7 +77,7 @@ The author's name under the video opens the Short too. Closing the pane keeps yo
 The pane says what failed:
 
 - **"Could not get the feed (signed out: no YouTube login in …)"**: sign in to YouTube in that browser, or switch with `/shorts browser`.
-- **"Could not get the feed (cannot read …'s cookies: …)"**: the browser has no cookies here, or (Safari) the terminal lacks Full Disk Access.
+- **"Could not get the feed (cannot read …'s cookies: …)"**: the browser has no cookies here, (Safari) the terminal lacks Full Disk Access, or (Chrome and the other Chromium browsers) the Keychain prompt was denied or went unanswered; press `j` and answer it with **Allow**.
 - **"Downloads keep failing"**: check the network, then press `j`.
 - **A tool reported missing although it is installed**: cc-shorts runs tools from Claude Code's own `PATH`, so a tool outside it counts as missing.
 

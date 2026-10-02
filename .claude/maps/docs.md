@@ -5,8 +5,9 @@
 > Verified: 2026-10-02 (3 research concerns; 10 drift claims checked against the code and git
 > history at HEAD by an independent verifier: 10 confirmed, 4 of them misleading enough to count as
 > debt)
-> Maintained: 2026-10-02 (targeted verification: the handoff's test count and a new Verification line
-> for the stale-`start` fix)
+> Maintained: 2026-10-03 (targeted verification: the four misleading handoff statements are fixed.
+> The test count and Verification cover the new fixes, and the handoff now describes the Keychain
+> report and the per-call batch budget.)
 
 ## Responsibilities
 
@@ -59,7 +60,8 @@ anything in it.
    - keys and the input source;
    - likes and the watched report;
    - cleanup, hot reload, `/clear` and the stale-dir sweep.
-8. **Verification.** A log dated 2026-10-02: 33 tests, plus manual tmux runs and checks by the user.
+8. **Verification.** A log dated 2026-10-02 that later fixes extend: 36 tests, an offline yt.py
+   script, plus manual tmux runs and checks by the user.
 9. **Closing lists.** "Still to verify and optimize" (5 items), "Risks" (5), "Rejected approaches"
    (10), "Related files", and "Recommended skills".
 
@@ -141,12 +143,12 @@ anything in it.
 These restated numbers match HEAD:
 
 - `PRELOAD` 5, refill at 5 left, watched at `min(10 s, duration / 2)`, `seen` capped at 1000;
-- `MAX_BATCHES` 3, the 33 ms ticker, three failed downloads;
-- 33 tests (22 in `tests/lib.test.ts`, 11 in `tests/pane.test.tsx`).
+- `MAX_BATCHES` 3 per `feed` call, the 33 ms ticker, three failed downloads;
+- 36 tests (22 in `tests/lib.test.ts`, 14 in `tests/pane.test.tsx`).
 
 When code and the handoff disagree, trust the code and fix the handoff in the same change.
 
-**Cosmetic or dated statements at HEAD** (the misleading ones are under Confirmed bugs)
+**Cosmetic or dated statements at HEAD**
 
 - **Finding 1's dev commands** pin `typescript@5` where README does not.
 - **Finding 2, step 4** hard-codes `cookiesfrombrowser: ('chrome',)` and the `~/.local/pipx` Python.
@@ -181,24 +183,6 @@ When code and the handoff disagree, trust the code and fix the handoff in the sa
   `.claude-plugin/plugin.json`.
 - The handoff does not mention `/map-module` or `.claude/maps/`, which CLAUDE.md's Knowledge Loop
   relies on.
-
-## Confirmed bugs / technical debt
-
-These are stale statements in `handoff.md` that would mislead someone changing the code.
-
-- **Finding 1's check command.** It says to check with `claude plugin validate .`. With
-  `marketplace.json` in the repo, that validates only the marketplace and skips the hooks-module
-  check. The right command is `claude plugin validate .claude-plugin/plugin.json`, as README and the
-  handoff's own "Related files" say.
-- **Finding 1 on testing.** It says that only pure functions and the UI can be tested. In fact the
-  pane tests stub host calls as hooks and exercise setup, the browser, download order, the input
-  source, likes and `/clear`. The handoff's own "Verification" section relies on that.
-- **"At most 3 batches per call".** This appears in "Where v1 stands" and in "Risks", and the
-  `MAX_BATCHES` comment repeats it. It understates the request rate: one `feed` call can make up to
-  six sequence requests.
-- **Step 8: the input source after a hot reload.** It says `session.start` gives the input source
-  back when the pane is closed. That has been false since `bed1bf0`, and the stale text hides a
-  regression in the player.
 
 ## Open questions
 

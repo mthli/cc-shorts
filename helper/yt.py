@@ -23,7 +23,8 @@ feed is the fallback (and the token comes back null).
 
 Cookies come through yt-dlp from the browser CC_SHORTS_BROWSER names, in
 yt-dlp's words (chrome, safari, firefox, edge, brave...), Chrome's when it is
-unset; one it cannot read, and a `feed` it finds signed out, exit saying so.
+unset; one it cannot read (a Chromium browser whose key the Keychain does not
+hand over included), and a `feed` it finds signed out, exit saying so.
 
 Run with a Python that has yt_dlp, the one an installed yt-dlp runs on (the
 system python3 has none); the mod finds it at startup by the `#!` line of the
@@ -63,11 +64,36 @@ def _profile_files(root, filename, logger):
 yt_dlp.cookies._find_files = _profile_files
 
 
+class _YoutubeDL(yt_dlp.YoutubeDL):
+    """A YoutubeDL that keeps the warnings `no_warnings` keeps off the screen."""
+
+    def __init__(self, *args, **kwargs):
+        self.warnings = []
+        super().__init__(*args, **kwargs)
+
+    def report_warning(self, message, only_once=False):
+        self.warnings.append(message)
+        super().report_warning(message, only_once)
+
+
 def ydl(cookies=True, **params):
     base = {'quiet': True, 'no_warnings': True, 'noprogress': True}
     if cookies:
         base['cookiesfrombrowser'] = (BROWSER,)
-    return yt_dlp.YoutubeDL({**base, **params})
+    y = _YoutubeDL({**base, **params})
+    if cookies:
+        # Read now rather than at the first request, to see how it went: a
+        # Chromium browser's cookies are encrypted with a key in the macOS
+        # Keychain, and when the Keychain does not hand it over (Deny, or no
+        # one there to answer) yt-dlp only warns and drops every encrypted
+        # cookie, so each request goes out signed out.
+        _ = y.cookiejar
+        if any('find-generic-password' in w for w in y.warnings):
+            raise yt_dlp.cookies.CookieLoadError('failed to load cookies') from PermissionError(
+                "the macOS Keychain did not hand over the browser's key: answer its prompt with Allow, "
+                'or pick another browser with /shorts browser'
+            )
+    return y
 
 
 def short_url(video_id):
@@ -100,11 +126,11 @@ def cookie_failure(err):
 
     yt-dlp reports it as a DownloadError raised while handling a
     CookieLoadError ("failed to load cookies"), itself raised while handling
-    what failed.
+    what failed; `ydl` raises one from what the Keychain refused.
     """
     while err is not None:
         if isinstance(err, yt_dlp.cookies.CookieLoadError):
-            return err.__context__ or err
+            return err.__cause__ or err.__context__ or err
         err = err.__context__
     return None
 
@@ -161,10 +187,14 @@ class Feed(Api):
         self.seen = seen
         self.want = want
         self.ids = []
+        # Shared by every scroll of this call: a token that brings nothing new
+        # leaves the home page's sequence only what it did not use.
+        self.batches = MAX_BATCHES
 
     def scroll(self, token):
         """Pull sequence batches from `token`; returns the token after the last."""
-        for _ in range(MAX_BATCHES):
+        while self.batches > 0:
+            self.batches -= 1
             res = self.call('reel/reel_watch_sequence', {'sequenceParams': token})
             self.add(video_ids(res.get('entries', [])))
             nxt = find_strings(res.get('continuationEndpoint', {}), 'token')

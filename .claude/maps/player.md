@@ -4,8 +4,10 @@
 > `MODULE: player` Decision blocks live only in commit messages so far).
 > Verified: 2026-10-02 (5 research concerns; 29 claims checked by 3 independent verifiers:
 > 20 confirmed, 9 partial and corrected, 0 refuted; 4 bugs confirmed)
-> Maintained: 2026-10-02 (targeted verification: `start` re-checks `epoch` after its awaits; the
-> stale-`start` race is fixed and covered by a pane test)
+> Maintained: 2026-10-03 (targeted verification: the confirmed bugs are fixed and covered by pane
+> tests. `start` and `play` write only while their epoch is current. `pause` holds back a Short still
+> on its way. `session.start` gives the input source back after the setup check. `dir` lives in
+> `shorts` once a `/clear` has passed.)
 
 ## Responsibilities
 
@@ -37,7 +39,8 @@ through `runHelper`.
 - **`Shorts`** (types/index.d.ts): the one value the host keeps across hot reloads, in the `shorts`
   atom (`$.state`, key `cc-shorts`/`shorts`, default `EMPTY`).
   - Its fields are `queue`, `cur`, `shorts` (id → `Short`), `status`, `message`, `pos`, `muted`,
-    `liked?`, `mode?`, `frame?`, `isLoggedIn` and `inputSource?`.
+    `liked?`, `mode?`, `frame?`, `isLoggedIn`, `inputSource?` and `dir?`.
+  - `dir` is written only once a `/clear` has passed.
   - `EMPTY` is idle, with an empty queue and `isLoggedIn: true`.
   - The `PluginState` augmentation types it, and `plugin.json` points `types` at this file.
 - **`Short`**: `{id, title, author, duration, hasAudio, path?}`. `path` is absent until the Short is
@@ -107,7 +110,9 @@ through `runHelper`.
 - **Tests** run with `claude plugin test .`.
   - `tests/lib.test.ts` covers lib.ts.
   - `tests/pane.test.tsx` drives the hooks through the host's testing API: setup, browser, drawing,
-    downloads, input source, replay, a skip while ffmpeg is starting, likes, Open, and `/clear`.
+    downloads, the input source (also after a hot reload with the pane closed), replay, a skip while
+    ffmpeg is starting, likes, Open (also while a Short is downloading), `/clear`, and a hot reload
+    after a `/clear`.
   - Other checks: `claude plugin validate .claude-plugin/plugin.json` and
     `bunx -p typescript tsc -p . --noEmit`.
 
@@ -119,14 +124,14 @@ The first load and every hot reload run this. A `/clear` does not.
 
 - Module state starts fresh, and `loadMark` (the load time in base 36) is fixed for this load.
 - `session.start` calls `next` first. Then it:
-  1. sets `dir = $TMPDIR/cc-shorts/<session id>`;
+  1. sets `dir` to the state's `dir`, or else to `$TMPDIR/cc-shorts/<session id>`;
   2. reads `browser` from the store;
   3. starts `checkSetup` without awaiting it, and toasts what is missing when it settles;
   4. registers `/shorts`;
   5. sweeps old session dirs (`find … -mtime +1 -exec rm -rf`) without awaiting it.
-- It then reads the panes and the state, and rebuilds `hadKeys` from `inputSource`. If the pane is not
-  open, it calls `holdKeys(false)`. That call does nothing in practice, because `python` is still
-  empty (see Confirmed bugs).
+- It then reads the panes and the state, and rebuilds `hadKeys` from `inputSource`.
+- If the pane is not open, it calls `holdKeys(false)` once the setup check it started has settled. No
+  draw comes to a closed pane, and until the check names `python`, `holdKeys` does nothing.
 - Then exactly one of:
   - **Pane open and `playing` or `loading`:** `play(pos)` resumes after the reload.
   - **Pane open, `paused`, raster, with a frame:** it rebuilds `lastCells` from the frame file still
@@ -179,6 +184,10 @@ The first load and every hot reload run this. A `/clear` does not.
 ### 4. `play(from)`: the pipeline per Short
 
 1. It bumps `epoch` (the stale-work guard) and stops the player.
+   - Each of its state writes goes through `setShortsAt`, which writes only while that epoch is
+     current. So a play that a newer action overtook cannot write over that action, even on a
+     compare-and-set retry.
+   - It checks `epoch` again before it recurses after a failed download.
 2. If the queue is used up, it sets `loading` ("Fetching the feed…") and awaits `refill`. If the queue
    is still used up, it sets `error`: "Could not get the feed (…). j retries; /shorts browser switches
    browser".
@@ -304,8 +313,14 @@ The first load and every hot reload run this. A `/clear` does not.
 
 - **`j` / `k` / `r`:** `skip(+1 / -1 / 0)` clamps `cur` to `[0, queue length]`, sets `pos = 0`, and
   calls `play`. `k` on the first Short replays it. `j` past the end refills.
-- **`p`:** resumes with `play(pos)` when paused. Otherwise `pause` bumps `epoch`, stops the player,
-  and keeps `frame` and `pos`. It does nothing without a running player.
+- **`p`:** resumes with `play(pos)` when paused. Otherwise it calls `pause`:
+  - **With a running player:** it bumps `epoch`, stops the player, and keeps `frame` and `p.pos`.
+  - **With no player, but `loading` or `playing`:** a Short is on its way (being fetched, downloaded
+    or started). It bumps `epoch` so that Short never starts, then writes `paused` with the message
+    "Paused" and no `frame`, so no picture of the Short before shows.
+    - If ffmpeg started while `pause` read the state, it pauses that player instead.
+    - Pressing `p` again plays the Short from `pos`, reusing the download.
+  - **In any other status:** it does nothing.
 - **`l`:**
   - It flips `liked` at once, in one `update`.
   - The call is queued on `likeChain` and skipped if a later press overturned it.
@@ -315,8 +330,8 @@ The first load and every hot reload run this. A `/clear` does not.
 - **`m`:** flips `muted`, restarts through `play(player.pos)` when a player is running, and toasts
   muted or unmuted.
 - **`o` / author:** calls `pause`, then runs `open https://www.youtube.com/shorts/<id>`, which uses
-  the system default browser, not the cookie browser. `pause` does nothing without a running player
-  (see Confirmed bugs).
+  the system default browser, not the cookie browser. So a Short still on its way also waits, paused,
+  instead of playing behind the browser.
 - **`x`:** `shutDown`, then `$.ui.close`.
 
 ### 9. Input source
@@ -331,7 +346,8 @@ The first load and every hot reload run this. A `/clear` does not.
   - the pane loses focus;
   - the status becomes `idle`;
   - `shutDown` runs;
-  - a non-`/clear` session ends.
+  - a non-`/clear` session ends;
+  - a hot reload finds the pane closed, once the setup check has named `python`.
 
 ### 10. Close, end, `/clear`, hot reload
 
@@ -364,8 +380,10 @@ The first load and every hot reload run this. A `/clear` does not.
   2. The host empties `$.state` and fires no `session.start`. The pane, ffmpeg, timers and module
      state carry on.
   3. `classic.SessionStart` takes `carried` and clears it on every source. Only with source
-     `clear` does it write the snapshot back.
-  4. `dir` keeps the id from the last `session.start` (commit 4226c08 records this trade-off).
+     `clear` does it write the snapshot back, together with the current `dir`.
+  4. `dir` keeps the id of the session before the `/clear`; commit 4226c08 records this trade-off.
+     Because `dir` is now in `shorts`, a later hot reload keeps using it instead of naming one after
+     the new session id.
 - **Hot reload:** the host kills the old load's children and cancels its timers. `$.state` and
   `$.store` survive, and `session.start` picks up as in section 1.
 
@@ -407,6 +425,9 @@ The first load and every hot reload run this. A `/clear` does not.
 - `mode` lives in `$.state`, so a new Claude Code session tries `image` again.
 - Every async step that changes what plays is guarded by `epoch` (in `play` and `start`) or by
   `player === p` (in `tick`, `denied` and `follow`).
+  - `play` and `start` also write state only while their epoch is current (`setShortsAt`).
+  - Every stop (`play`, `pause`, `shutDown`, `session.end`) must bump `epoch` for these guards to
+    hold.
 - Helpers never reject (`runHelper`), and `downloadNext` relies on `fetchShort` never rejecting. If a
   job rejected, `isDownloading` would stay true and no download would run again.
 
@@ -467,21 +488,6 @@ The first load and every hot reload run this. A `/clear` does not.
 - `dir` falls back to `/tmp` only when `TMPDIR` is unset.
 - The non-`/clear` `session.end` path allows its `ime.py` call 5 s and its `rm` 2 s, but the host
   gives the whole end chain 1.5 s by default. A dir left over that way is left to the sweep.
-
-## Confirmed bugs / technical debt
-
-- **The input source is not given back after a hot reload with the pane closed.** `python` resets on
-  reload, and only the unawaited `checkSetup` sets it. So the give-backs that `session.start` makes
-  (directly, or through `shutDown`) find `python` empty and do nothing. The English layout then stays
-  selected until session end, or until the pane next takes and releases the keyboard.
-  - It was a regression from `bed1bf0`: at `22f96cc`, `python` was set before the give-back.
-  - It contradicts the `22f96cc` Decision and the handoff.
-- **Open or the author while loading.** `openInBrowser` relies on `pause`, which does nothing without
-  a running player. So a press during "Fetching" or "Downloading" opens the browser, and the pane
-  then starts the Short with sound anyway.
-- **Folder left behind (medium confidence).** A hot reload after a `/clear` moves `dir` to the new
-  session id. The earlier folder, which the restored state still points into, is then left to a later
-  session's stale sweep.
 
 ## Open questions
 

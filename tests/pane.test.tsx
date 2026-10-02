@@ -327,6 +327,41 @@ test('an input method is kept off the hotkeys while the pane holds the keyboard'
   expect(imeCalls.slice(3)).toEqual([['english'], ['select', PINYIN]])
 })
 
+test('a hot reload that finds the pane closed gives the input source back once the setup check is done', async ($, on) => {
+  const PINYIN = 'com.apple.inputmethod.SCIM.ITABC'
+  const clock = mock.clock(on)
+  const imeCalls: (readonly string[])[] = []
+  on('process.run', async (_, e) => {
+    // The setup check takes a while: the reload runs on before it has named the Python.
+    if (e.argv[0] === 'which') await clock.sleep(100)
+    const at = e.argv.findIndex(arg => arg.endsWith('/helper/ime.py'))
+    if (at >= 0) imeCalls.push(e.argv.slice(at + 1))
+    return ran(0, '{}')
+  })
+  // The last load switched to English and was reloaded before it gave the source back.
+  let value: unknown = { ...EMPTY, inputSource: PINYIN }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(imeCalls).toEqual([])
+
+  // No draw comes to a closed pane: the source comes back once the check is done.
+  await clock.advance(100)
+  expect(imeCalls).toEqual([['select', PINYIN]])
+  expect(value).not.toHaveProperty('inputSource', PINYIN)
+})
+
 test('replay plays the Short on screen again from the start', async ($, on) => {
   on('process.run', () => ({
     value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -476,6 +511,62 @@ test('the author, and Open, open the Short in the browser', async ($, on) => {
   await ui.unmount()
 })
 
+test('Open while the Short is still downloading: it waits, paused, instead of playing behind the browser', async ($, on) => {
+  const clock = mock.clock(on)
+  const argvs: (readonly string[])[] = []
+  on('process.run', async (_, e) => {
+    argvs.push(e.argv)
+    const at = e.argv.indexOf('download')
+    if (at < 0) return ran(0)
+    // The download takes a second of the mocked clock: Open lands while it runs.
+    await clock.sleep(1000)
+    const id = e.argv[at + 1] ?? ''
+    const short = { id, title: 'A title', author: 'Someone', duration: 30, hasAudio: true, path: `/tmp/${id}.mp4` }
+    return ran(0, JSON.stringify(short))
+  })
+  on('fs.exists', () => ({ value: true }))
+  mock.store(on)
+  const spawned: (readonly string[])[] = []
+  on('process.spawn', async function* (_, e) {
+    spawned.push(e.argv)
+    return { value: { code: 1, signal: null } }
+  })
+  // Paused on a Short not downloaded yet.
+  const short = { id: 'abc123', title: 'A title', author: 'Someone', duration: 30, hasAudio: true }
+  let value: unknown = { ...EMPTY, queue: [short.id], shorts: { [short.id]: short }, status: 'paused' }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  // What `session.start` asks of the session, for the helper's path; the
+  // pane is up, so nothing is shut down.
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  const pane = { id: 'shorts', title: 'Shorts', isShown: true, isFocused: true, isPlaced: true }
+  on('ui.panes', () => ({ value: [pane] }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'pause' })
+  expect(value).toEqual(expect.objectContaining({ status: 'loading', message: 'Downloading…' }))
+  await ui.press({ key: 'open' })
+  expect(argvs.filter(argv => argv[0] === 'open')).toHaveLength(1)
+  // The download lands after the browser opened: nothing starts.
+  await clock.advance(1000)
+  expect(spawned).toEqual([])
+  expect(value).toEqual(expect.objectContaining({ status: 'paused' }))
+  // Play starts it, from the download already in.
+  await ui.press({ key: 'pause' })
+  expect(spawned.filter(argv => argv[0] === 'ffmpeg')).toHaveLength(1)
+  await ui.unmount()
+})
+
 test('what plays outlives a /clear', async ($, on) => {
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('classic.SessionStart', () => ({}))
@@ -493,4 +584,46 @@ test('what plays outlives a /clear', async ($, on) => {
   await $.classic.SessionStart({ source: 'clear' })
   expect(await isMuted()).toBe(false)
   await ui.unmount()
+})
+
+test('a hot reload after a /clear cleans up the folder the downloads went to', async ($, on) => {
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
+  const removed: string[] = []
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'rm') removed.push(e.argv.at(-1) ?? '')
+    return ran(0)
+  })
+  let value: unknown = EMPTY
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  let sessionId = 'before-clear'
+  on('session.id', () => ({ value: sessionId }))
+  on('env.get', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  // Playing when the /clear comes: the Short and its frames sit in the first session's folder.
+  const short = { id: 'abc123', title: 'A title', author: 'Someone', duration: 30, hasAudio: true }
+  value = {
+    ...EMPTY,
+    queue: [short.id],
+    shorts: { [short.id]: { ...short, path: '/tmp/cc-shorts/before-clear/abc123.mp4' } },
+    status: 'playing',
+  }
+  await $.session.end({ reason: 'clear', sessionId: 'before-clear', resume: { id: 'before-clear' } })
+  value = EMPTY
+  sessionId = 'after-clear'
+  await $.classic.SessionStart({ source: 'clear' })
+  // Reloaded with the pane closed: it shuts down, and the folder it removes is the one in use.
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(removed).toEqual(['/tmp/cc-shorts/before-clear'])
 })

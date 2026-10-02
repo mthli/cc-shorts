@@ -4,6 +4,9 @@
 > Decision blocks live only in commit messages so far).
 > Verified: 2026-10-02 (3 research concerns; 10 claims checked against helper/yt.py and the installed
 > yt-dlp 2026.8.19 source by an independent verifier: 7 confirmed, 3 partial and corrected, 0 refuted)
+> Maintained: 2026-10-03 (targeted verification: `ydl` reports a refused Keychain as a cookie
+> failure, and `MAX_BATCHES` is shared by every scroll of one `feed` call. Checked by an offline
+> script that stubs yt-dlp's cookie reader.)
 
 ## Responsibilities
 
@@ -24,14 +27,20 @@
 - Module constants:
   - `BROWSER`: `CC_SHORTS_BROWSER`, or `chrome` when unset or empty; read once at import.
   - `HOME` (`https://www.youtube.com/`) and `SUBSCRIPTIONS` (`/feed/subscriptions/shorts`).
-  - `MAX_BATCHES = 3`: the most `reel_watch_sequence` calls one `scroll` makes.
+  - `MAX_BATCHES = 3`: the most `reel_watch_sequence` calls one `feed` call makes. Its scrolls
+    share the budget through `Feed.batches`.
   - `FORMAT = bv*[width<=480][ext=mp4]+ba[ext=m4a]/b[width<=480]/b`: limited by width, because a
     vertical video's height is its long side.
 - `_profile_files`: wraps yt-dlp's private `cookies._find_files` and skips any path containing
   `/Storage/`. It is installed at import by rebinding the module attribute.
-- `ydl(cookies=True, **params)`: the only `YoutubeDL` factory. It sets `quiet`, `no_warnings` and
-  `noprogress`, adds `cookiesfrombrowser=(BROWSER,)` unless `cookies=False`, and lets caller params
-  override.
+- `ydl(cookies=True, **params)`: the only `YoutubeDL` factory.
+  - It sets `quiet`, `no_warnings` and `noprogress`, adds `cookiesfrombrowser=(BROWSER,)` unless
+    `cookies=False`, and lets caller params override.
+  - It builds a `_YoutubeDL`, which records every warning in `.warnings`, including the ones
+    `no_warnings` hides.
+  - With cookies, it reads them at once rather than at the first request. If yt-dlp warned that
+    `find-generic-password` failed (the Keychain refused a Chromium browser's key), it raises a
+    `CookieLoadError` from a `PermissionError` that carries the hint.
 - `Api`: one InnerTube session. It holds the `YoutubeTab` extractor of a cookie-bearing `YoutubeDL`,
   the home page HTML, its first `ytcfg`, and `logged_in` (the page's `ytcfg.LOGGED_IN`).
   `call(endpoint, body)` goes through `_call_api` with ytcfg's `INNERTUBE_CONTEXT`. Auth headers,
@@ -56,8 +65,12 @@
 Failure contract:
 
 - Clean one-line exits:
-  - `cannot read <browser>'s cookies: <cause>`, for any cookie-load failure. For Safari with a
-    `PermissionError`, the cause is replaced by a Full Disk Access hint.
+  - `cannot read <browser>'s cookies: <cause>`, for any cookie-load failure.
+    - For Safari with a `PermissionError`, the cause is replaced by a Full Disk Access hint.
+    - For a Chromium browser whose key the Keychain refused, the cause is
+      `the macOS Keychain did not hand over the browser's key: answer its prompt with Allow, …`.
+    - `cookie_failure` reads a `CookieLoadError`'s `__cause__` before its `__context__`. So that
+      hint survives being raised inside `download`'s retry.
   - `signed out: no YouTube login in <browser>'s cookies`: `feed` found no ids and the page is signed
     out.
   - `<endpoint>: logged out, nothing to like with`: `like` or `unlike` while signed out.
@@ -81,19 +94,24 @@ Failure contract:
    2. `Feed()` builds an `Api`, which runs on every call, even with a valid token: it makes a
       cookie-bearing `YoutubeDL`, takes the `YoutubeTab` extractor (never `initialize()`d), GETs the
       home page, and parses its first `ytcfg`. A cookie failure here propagates to `main`.
-   3. **With a token**, it calls `scroll(token)`. Up to `MAX_BATCHES` times, it POSTs
-      `reel/reel_watch_sequence` with `{sequenceParams: token}` and adds the ids under `entries`. The
-      next token comes from `continuationEndpoint`; when there is none, it returns `None` (end of
-      the sequence). It stops once `ids >= want`, checked after each batch. Any exception writes a
-      stderr note and drops the token.
+   3. **With a token**, it calls `scroll(token)`.
+      - While the call's batch budget lasts, it POSTs `reel/reel_watch_sequence` with
+        `{sequenceParams: token}` and adds the ids under `entries`. The budget is `MAX_BATCHES`,
+        shared with the home path.
+      - The next token comes from `continuationEndpoint`. When there is none, it returns `None`
+        (end of the sequence).
+      - It stops once `ids >= want`, checked after each batch.
+      - Any exception writes a stderr note and drops the token.
    4. **With no ids yet**, `source = home` and it calls `from_home`:
       - Every `reelWatchEndpoint` with a `videoId` anywhere in the home page's `ytInitialData` becomes
         a seed, not only those on the Shorts shelf. The seeds themselves are added to `ids`.
       - It POSTs `reel/reel_item_watch` for the first seed.
       - The token is the first `sequenceContinuation` in that reply, or else the seed's
         `sequenceParams`.
-      - Then it calls `scroll(token)`. Any exception drops the token. If `reel_item_watch` fails, the
-        seeds alone come back with a null token.
+      - Then it calls `scroll(token)` with whatever budget the token path left. With none left, it
+        returns that token unread, and the next call scrolls from there.
+      - Any exception drops the token. If `reel_item_watch` fails, the seeds alone come back with a
+        null token.
    5. **Still no ids.**
       - Signed out: it exits with the signed-out message.
       - Otherwise `source = subscriptions` and `token = None`. A fresh
@@ -136,6 +154,11 @@ Failure contract:
     `cookies.CookieLoadError`.
   - Private: `cookies._find_files`, `get_info_extractor('YoutubeTab')`, `_download_webpage`,
     `extract_ytcfg`, `extract_yt_initial_data`, `_call_api` and `generate_api_headers`.
+  - Behavior relied on:
+    - `report_warning`, which `_YoutubeDL` overrides;
+    - the lazily loaded `cookiejar` property;
+    - the text of yt-dlp's Keychain warning (`find-generic-password failed`, or
+      `exception running find-generic-password: …`).
   - `_mark_watched`, reached through the `mark_watched` param.
 - **Outbound: YouTube.**
   - The home page HTML.
@@ -181,8 +204,8 @@ Failure contract:
 
 **Feed request volume**
 
-- `MAX_BATCHES` bounds each `scroll`, not each `feed` call. A token path that yields nothing new,
-  followed by the home path, can make six sequence POSTs plus `reel_item_watch` in one call.
+- One `feed` call makes at most `MAX_BATCHES` sequence POSTs, plus one `reel_item_watch` and the home
+  page. That holds even when the token path yields nothing new and the home path runs after it.
 - `want` is checked only after a whole batch, and `add` does not cap. Replies routinely exceed
   `want`: a home reply is every seed plus at least one batch.
 
@@ -229,23 +252,8 @@ Failure contract:
 
 - No `likeParams` is sent, and no response field is checked.
 
-## Confirmed bugs / technical debt
-
-- **A Keychain denial reads as "signed out" (medium confidence).** When the macOS Keychain lookup for
-  a Chromium browser's Safe Storage key is denied or fails, yt-dlp raises no cookie-load error. It
-  drops every encrypted cookie with a suppressed warning.
-  - `feed` then exits `signed out: …`, and the pane suggests switching browsers instead of granting
-    Keychain access.
-  - `like` and `unlike` exit "logged out".
-  - This breaks the docstring's promise that an unreadable browser exits saying so.
-- **The `MAX_BATCHES` comment is wrong.** It says "never pull more than this many per call", and the
-  handoff repeats it. In fact one `feed` call can make up to six `reel_watch_sequence` requests plus
-  one `reel_item_watch`.
-
 ## Open questions
 
-- Is the per-`scroll` bound of `MAX_BATCHES`, which allows two scrolls per `feed` call, intended? Or
-  should the request rate be capped per call, as the comment says?
 - Should a token path that returned only seen ids, or that raised after adding ids, keep its last
   good continuation instead of restarting from home?
 - Is reporting a near-complete watch after about 10 s of play acceptable for how YouTube personalizes
@@ -264,3 +272,7 @@ Failure contract:
   - The videostats pings land in the account's Shorts watch history.
 - Safari without Full Disk Access fails at `open` with a `PermissionError`, rather than earlier with
   a `FileNotFoundError`.
+- The Keychain report has been checked only against a stub of yt-dlp's cookie reader. Still
+  untested:
+  - a real Deny on the macOS prompt;
+  - whether a newer yt-dlp keeps the `find-generic-password` warning text it matches.
