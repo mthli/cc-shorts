@@ -10,8 +10,26 @@ import type {
 } from 'claude-code'
 
 import type { Frame, Mode, Short, Shorts } from '../types'
-import { blankCells, clockTime, ffmpegArgs, frameSize, lastLine, parseProgress, toCells, videoBox } from './lib'
-import type { Box } from './lib'
+import {
+  BROWSERS,
+  blankCells,
+  browserOptions,
+  browserQuestion,
+  clockTime,
+  ffmpegArgs,
+  findBrowser,
+  frameSize,
+  installPrompt,
+  installQuestion,
+  lastLine,
+  nameList,
+  parseProgress,
+  setupToast,
+  shebangPython,
+  toCells,
+  videoBox,
+} from './lib'
+import type { Box, Missing } from './lib'
 
 const PANE = 'shorts'
 const VIDEO = 'video'
@@ -26,6 +44,8 @@ const WATCHED_SECONDS = 10
 /** The widest key the pane draws (`r: Replay`, `o: Open ↗`), and the space between keys. */
 const KEY_COLUMNS = 9
 const KEY_GAP = 2
+/** The answer to the setup question that hands the install to Claude. */
+const INSTALL = 'Ask Claude to install'
 
 const EMPTY: Shorts = {
   queue: [],
@@ -54,7 +74,17 @@ type Player = {
 // ffmpeg and cancels the timers with it, and `session.start` picks up again
 // from `shorts`, which the host keeps.
 let dir = ''
+/** The Python that runs `helper/`, one that has yt_dlp; '' until the setup check finds it. */
 let python = ''
+/** The last setup check, which names `python`: a helper waits for it. */
+let checking: Promise<Missing[]> | undefined
+/** True once a check found everything `/shorts` needs; until then each `/shorts` checks again. */
+let isSetUp = false
+/**
+ * yt-dlp's name for the browser whose cookies the helpers read, as the person
+ * chose it (kept in `$.store`); '' until they do, and `yt.py` reads Chrome's.
+ */
+let browser = ''
 let player: Player | undefined
 let ticker: Timer | undefined
 let isBlitting = false
@@ -74,7 +104,7 @@ let layout: Box | undefined
 /** What the picture shows now, so a redraw draws the same. */
 let lastSource: ImageSource | undefined
 let lastCells: string | undefined
-let refilling: Promise<void> | undefined
+let refilling: Promise<string | undefined> | undefined
 /** Downloads not started yet, in the order they start (`download`). */
 const waiting: { id: string; start: () => Promise<void>; drop: () => void }[] = []
 let isDownloading = false
@@ -92,7 +122,32 @@ let keysChain: Promise<unknown> = Promise.resolve()
 const log = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 const setShorts = ($: EngineInterface, change: (s: Shorts) => Shorts) => update($, shorts, change)
 
-/** Runs a script of `helper/` and parses the JSON it prints; undefined on failure. */
+type HelperReply<T> = { value: T; error?: undefined } | { value?: undefined; error: string }
+
+/** Runs a script of `helper/` and parses the JSON it prints, or says why it could not; never rejects. */
+async function runHelper<T>(
+  $: EngineInterface,
+  script: 'yt.py' | 'ime.py',
+  args: string[],
+  stdin: string | undefined,
+  timeoutMs: number,
+): Promise<HelperReply<T>> {
+  let error: string
+  try {
+    await checking
+    const env = browser === '' ? undefined : { CC_SHORTS_BROWSER: browser }
+    const argv = [python, '-B', `${$.plugin.root}/helper/${script}`, ...args]
+    const run = await $.process.run(argv, { stdin, timeoutMs, env })
+    if (run.exitCode === 0) return { value: JSON.parse(lastLine(run.stdout)) as T }
+    error = lastLine(run.stderr) || `exit ${run.exitCode}`
+  } catch (err) {
+    error = String(err)
+  }
+  log($, `${script} ${args[0]} failed: ${error}`)
+  return { error }
+}
+
+/** What `runHelper` parsed; undefined on failure. */
 async function helper<T>(
   $: EngineInterface,
   script: 'yt.py' | 'ime.py',
@@ -100,14 +155,7 @@ async function helper<T>(
   stdin: string | undefined,
   timeoutMs: number,
 ): Promise<T | undefined> {
-  try {
-    const run = await $.process.run([python, '-B', `${$.plugin.root}/helper/${script}`, ...args], { stdin, timeoutMs })
-    if (run.exitCode === 0) return JSON.parse(lastLine(run.stdout)) as T
-    log($, `${script} ${args[0]} failed: ${lastLine(run.stderr)}`)
-  } catch (err) {
-    log($, `${script} ${args[0]} failed: ${String(err)}`)
-  }
-  return undefined
+  return (await runHelper<T>($, script, args, stdin, timeoutMs)).value
 }
 
 // --- the hooks ---------------------------------------------------------------
@@ -117,8 +165,18 @@ export const register: Register = on => {
     const started = await next(e)
     const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
     dir = `${tmp}/cc-shorts/${await $.session.id()}`
-    python = `${(await $.env.get('HOME')) ?? ''}/.local/pipx/venvs/yt-dlp/bin/python`
-    await $.command.register({ name: 'shorts', description: 'Scroll your YouTube Shorts feed in a side pane' })
+    const chosen = await $.store.get('browser').catch(() => undefined)
+    browser = typeof chosen === 'string' ? chosen : ''
+    // Unawaited: the first prompt waits for this hook, and a helper waits for the check.
+    void checkSetup($).then(missing => {
+      const toast = setupToast(missing)
+      if (toast !== undefined) $.ui.toast(toast, { timeoutMs: 10_000 })
+    })
+    await $.command.register({
+      name: 'shorts',
+      description: 'Scroll your YouTube Shorts feed in a side pane',
+      argumentHint: '[browser]',
+    })
     // Downloads of sessions that ended without cleaning up (a crash).
     // prettier-ignore
     void $.process.run([
@@ -146,7 +204,17 @@ export const register: Register = on => {
     return started
   })
 
-  on('command.run', { command: 'shorts' }, async $ => {
+  on('command.run', { command: 'shorts' }, async ($, e) => {
+    // Checked again until it passes: the person may have installed something since.
+    if (!isSetUp) {
+      const missing = await checkSetup($)
+      if (missing.some(m => !m.isOptional)) {
+        void offerInstall($, missing)
+        return {}
+      }
+    }
+    // The first time, and on `/shorts browser`: whose cookies the feed comes through.
+    if ((browser === '' || e.args.trim() === 'browser') && !(await chooseBrowser($))) return {}
     await $.ui.open({ id: PANE, title: 'Shorts', focus: true, columns: 50, rows: 40 })
     const s = await read($, shorts)
     if (s.status === 'idle' || s.status === 'error') void play($, s.pos)
@@ -194,7 +262,7 @@ export const register: Register = on => {
       state,
       isLiked ? 'Liked' : '',
       s.muted ? 'Muted' : '',
-      s.isLoggedIn ? '' : 'Signed out: not your feed',
+      s.isLoggedIn ? '' : 'Signed out: /shorts browser to switch',
     ]
       .filter(Boolean)
       .join(' · ')
@@ -276,6 +344,103 @@ export const register: Register = on => {
   })
 }
 
+// --- setup -------------------------------------------------------------------
+
+/**
+ * Looks for what `/shorts` needs, naming the helpers' Python on the way.
+ * Each tool runs from Claude Code's own PATH, as playback runs it: one
+ * installed out of that PATH counts as missing.
+ */
+function checkSetup($: EngineInterface): Promise<Missing[]> {
+  checking = (async () => {
+    const home = (await $.env.get('HOME')) ?? ''
+    const [found, ffmpeg, hasDeno] = await Promise.all([
+      findPython($, home),
+      $.process.run(['ffmpeg', '-hide_banner', '-devices'], { timeoutMs: 10_000 }).catch(() => undefined),
+      succeeds($, ['deno', '--version']),
+    ])
+    python = found
+    const missing: Missing[] = []
+    if (found === '') missing.push({ name: 'yt-dlp', why: 'no Python that imports yt_dlp', formula: 'yt-dlp' })
+    if (ffmpeg?.exitCode !== 0) missing.push({ name: 'ffmpeg', why: 'not found', formula: 'ffmpeg' })
+    else if (!/\baudiotoolbox\b/.test(ffmpeg.stdout)) {
+      missing.push({ name: 'ffmpeg', why: 'this ffmpeg has no audiotoolbox output for the sound', formula: 'ffmpeg' })
+    }
+    if (!hasDeno) {
+      const why = "not found; yt-dlp solves YouTube's JS challenges with it, and may miss formats without"
+      missing.push({ name: 'deno', why, formula: 'deno', isOptional: true })
+    }
+    isSetUp = !missing.some(m => !m.isOptional)
+    return missing
+  })()
+  return checking
+}
+
+/**
+ * A Python that imports yt_dlp: the one the `yt-dlp` on the PATH runs on, by
+ * its `#!` line (pipx's, Homebrew's, pip's), else pipx's own wherever its
+ * home is (`~/.local/pipx`, or a newer pipx's `~/Library/Application
+ * Support/pipx`); '' when none does.
+ */
+async function findPython($: EngineInterface, home: string): Promise<string> {
+  const pythons: string[] = []
+  const which = await $.process.run(['which', 'yt-dlp']).catch(() => undefined)
+  const script = which?.exitCode === 0 ? which.stdout.trim() : ''
+  if (script !== '') {
+    const head = await $.process.run(['head', '-n', '1', script]).catch(() => undefined)
+    const named = shebangPython(head?.stdout ?? '')
+    if (named !== undefined) pythons.push(named)
+  }
+  const pipxHomes = [await $.env.get('PIPX_HOME'), `${home}/.local/pipx`, `${home}/Library/Application Support/pipx`]
+  for (const root of pipxHomes) if (root) pythons.push(`${root}/venvs/yt-dlp/bin/python`)
+  for (const candidate of pythons) if (await succeeds($, [candidate, '-c', 'import yt_dlp'])) return candidate
+  return ''
+}
+
+/** Whether `argv` starts and exits 0 within 10 s. */
+const succeeds = ($: EngineInterface, argv: string[]) =>
+  $.process.run(argv, { timeoutMs: 10_000 }).then(
+    run => run.exitCode === 0,
+    () => false,
+  )
+
+/** Asks to install what is missing, and hands the install to Claude on a yes. */
+async function offerInstall($: EngineInterface, missing: Missing[]) {
+  const hasBrew = await succeeds($, ['which', 'brew'])
+  // Dismissed, or no one to ask (`-p`): nothing to do.
+  const options = { header: 'cc-shorts', options: [INSTALL, 'Not now'] }
+  const answer = await $.ui.ask(installQuestion(missing, hasBrew), options).catch(() => '')
+  // The person chose it: Claude reads it as their own words.
+  if (answer === INSTALL) await $.prompt.submit({ text: installPrompt(missing, hasBrew), asUser: true })
+}
+
+/**
+ * Asks which browser the person is signed in to YouTube with, offering those
+ * used here, and keeps the answer; false when they named none yt-dlp reads.
+ */
+async function chooseBrowser($: EngineInterface): Promise<boolean> {
+  const root = `${(await $.env.get('HOME')) ?? ''}/Library/Application Support`
+  const isHere = await Promise.all(
+    BROWSERS.map(b => b.dir === undefined || $.fs.exists(`${root}/${b.dir}`).catch(() => false)),
+  )
+  const here = BROWSERS.filter((_, i) => isHere[i])
+  // Safari alone (every Mac has it) leaves nothing to ask.
+  const question = { header: 'Browser', options: browserOptions(here, browser) }
+  const answer =
+    here.length < 2 ? (here[0]?.name ?? '') : await $.ui.ask(browserQuestion(here, browser), question).catch(() => '')
+  if (answer === '') return false
+  const chosen = findBrowser(answer)
+  if (chosen === undefined) {
+    $.ui.toast(`cc-shorts: yt-dlp reads ${nameList(BROWSERS.map(b => b.name))}; not ${answer}`, { timeoutMs: 10_000 })
+    return false
+  }
+  // Where the feed had scrolled to belongs to the account it scrolled with.
+  if (chosen.id !== (browser || 'chrome')) await $.store.delete('token')
+  browser = chosen.id
+  await $.store.set('browser', browser)
+  return true
+}
+
 // --- playback ----------------------------------------------------------------
 
 /** Plays the Short at `cur` from `from` seconds, downloading it if need be. */
@@ -285,11 +450,13 @@ async function play($: EngineInterface, from = 0) {
   let s = await read($, shorts)
   if (s.queue.length <= s.cur) {
     await setShorts($, s => ({ ...s, status: 'loading', message: 'Fetching the feed…' }))
-    await refill($)
+    const error = await refill($)
     if (my !== epoch) return
     s = await read($, shorts)
     if (s.queue.length <= s.cur) {
-      await setShorts($, s => ({ ...s, status: 'error', message: 'Could not get the feed; press j to retry' }))
+      const why = error === undefined ? '' : ` (${error})`
+      const message = `Could not get the feed${why}. j retries; /shorts browser switches browser`
+      await setShorts($, s => ({ ...s, status: 'error', message }))
       return
     }
   }
@@ -457,15 +624,15 @@ function stopPlayer() {
 
 type FeedReply = { ids: string[]; token: string | null; source: string; loggedIn: boolean }
 
-/** Pulls the next batch of the feed onto the queue; one call at a time. */
-function refill($: EngineInterface): Promise<void> {
+/** Pulls the next batch of the feed onto the queue, one call at a time; resolves why it could not. */
+function refill($: EngineInterface): Promise<string | undefined> {
   refilling ??= (async () => {
     const s = await read($, shorts)
     const token = await $.store.get('token')
     const seen = ((await $.store.get('seen')) as string[] | undefined) ?? []
     const request = { token: typeof token === 'string' ? token : null, seen: [...seen, ...s.queue], want: 10 }
-    const reply = await helper<FeedReply>($, 'yt.py', ['feed'], JSON.stringify(request), 120_000)
-    if (reply === undefined) return
+    const { value: reply, error } = await runHelper<FeedReply>($, 'yt.py', ['feed'], JSON.stringify(request), 120_000)
+    if (reply === undefined) return error
     log($, `feed: ${reply.ids.length} from ${reply.source}`)
     if (reply.token === null) await $.store.delete('token')
     else await $.store.set('token', reply.token)
@@ -653,7 +820,7 @@ async function shutDown($: EngineInterface) {
  * the pane lets go; one switch at a time, in order.
  */
 function holdKeys($: EngineInterface, isHeld: boolean): Promise<unknown> {
-  // Drawn before `session.start` named the helper's Python (a hot reload):
+  // Drawn before the setup check named the helper's Python (a hot reload):
   // a later draw acts on it.
   if (isHeld !== hadKeys && python !== '') {
     hadKeys = isHeld

@@ -293,3 +293,166 @@ test('off the terminal it says so instead of drawing a player', async $ => {
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
   await ui.unmount()
 })
+
+/** `/shorts` as the person types it. */
+const SHORTS = {
+  command: 'shorts',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: false, columns: 120 },
+} as const
+
+/** What a run of `argv` answers, as `process.run` resolves it. */
+const ran = (exitCode: number, stdout = '') => ({
+  value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+
+test('missing yt-dlp and ffmpeg: the session says so, and /shorts offers to have Claude install them', async ($, on) => {
+  on('process.run', (_, e) => {
+    const [exe, arg] = e.argv
+    if (exe === 'ffmpeg') throw new Error('spawn ffmpeg ENOENT')
+    if (exe === 'which') return ran(arg === 'brew' ? 0 : 1)
+    // No Python that imports yt_dlp; deno and the rest are there.
+    return ran(e.argv.includes('import yt_dlp') ? 1 : 0)
+  })
+  on('fs.exists', () => ({ value: true }))
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const questions: string[] = []
+  let answer = 'Ask Claude to install'
+  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+    const question = e.questions[0]?.question ?? ''
+    questions.push(question)
+    return { result: { questions: e.questions, answers: { [question]: answer } } }
+  })
+  const submitted: { text: string; asUser?: boolean }[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push({ text: e.text, asUser: e.origin.kind === 'plugin' ? e.origin.asUser : undefined })
+    return { text: e.text }
+  })
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  const { settle } = mock.clock(on)
+  mock.env(on, { HOME: '/Users/someone', TMPDIR: '/tmp' })
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await settle()
+  expect(toasts).toEqual(['cc-shorts: yt-dlp and ffmpeg are missing; /shorts offers to install them'])
+
+  await $.command.run(SHORTS)
+  await settle()
+  expect(opened).toEqual([])
+  expect(questions).toHaveLength(1)
+  expect(questions[0]).toContain('`brew install yt-dlp ffmpeg`')
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]?.asUser).toBe(true)
+  expect(submitted[0]?.text).toContain('- ffmpeg: not found')
+  expect(submitted[0]?.text).toContain('Run `brew install yt-dlp ffmpeg`')
+
+  // Not now: nothing for Claude, and still no pane.
+  answer = 'Not now'
+  await $.command.run(SHORTS)
+  await settle()
+  expect(questions).toHaveLength(2)
+  expect(submitted).toHaveLength(1)
+  expect(opened).toEqual([])
+})
+
+test('everything there: /shorts asks for the browser once, and the helpers read its cookies', async ($, on) => {
+  const PYTHON = '/opt/homebrew/Cellar/yt-dlp/2026.8.19/libexec/bin/python'
+  const helperCalls: { argv: readonly string[]; browser?: string }[] = []
+  let feedError = ''
+  on('process.run', (_, e) => {
+    const [exe, ...args] = e.argv
+    if (exe === 'which') return ran(0, '/opt/homebrew/bin/yt-dlp\n')
+    if (exe === 'head') return ran(0, `#!${PYTHON}\n`)
+    if (exe === 'ffmpeg') return ran(0, ' E audiotoolbox    AudioToolbox output device\n')
+    if (args.includes('import yt_dlp')) return ran(exe === PYTHON ? 0 : 1)
+    if (!e.argv.some(arg => arg.endsWith('/helper/yt.py'))) return ran(0)
+    helperCalls.push({ argv: e.argv, browser: e.init?.env?.CC_SHORTS_BROWSER })
+    if (feedError !== '') return { value: { ...ran(1).value, stderr: `${feedError}\n` } }
+    return ran(0, JSON.stringify({ ids: [], token: null, source: 'home', loggedIn: true }))
+  })
+  // Chrome, Edge and Firefox used here; Safari is on every Mac.
+  const used = ['Google/Chrome', 'Microsoft Edge', 'Firefox/Profiles']
+  on('fs.exists', (_, e) => ({ value: used.some(dir => e.path.endsWith(`/Library/Application Support/${dir}`)) }))
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const asked: { question: string; options: string[] }[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+    const q = e.questions[0]
+    asked.push({ question: q?.question ?? '', options: (q?.options ?? []).map(o => o.label) })
+    return { result: { questions: e.questions, answers: { [q?.question ?? '']: 'Firefox' } } }
+  })
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  let value: unknown = EMPTY
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  // Scrolled with Chrome's login before there was a choice.
+  const store: Record<string, unknown> = { token: 'from-chrome' }
+  on('store.get', (_, e) => ({ value: store[e.key] }))
+  on('store.set', (_, e) => {
+    store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    delete store[e.key]
+    return { value: undefined }
+  })
+  const { settle } = mock.clock(on)
+  mock.env(on, { HOME: '/Users/someone', TMPDIR: '/tmp' })
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await settle()
+  expect(toasts).toEqual([])
+
+  await $.command.run(SHORTS)
+  await settle()
+  expect(asked).toEqual([
+    { question: expect.stringContaining('Which browser'), options: ['Chrome', 'Safari', 'Edge', 'Firefox'] },
+  ])
+  expect(store.browser).toBe('firefox')
+  // Chrome's place in the feed is no use to Firefox's account.
+  expect(store.token).toBeUndefined()
+  expect(opened).toEqual(['shorts'])
+  expect(helperCalls[0]?.argv[0]).toBe(PYTHON)
+  expect(helperCalls[0]?.argv).toContain('feed')
+  expect(helperCalls[0]?.browser).toBe('firefox')
+
+  // Chosen once: the next /shorts asks nothing, and a failed feed says why.
+  feedError = "signed out: no YouTube login in firefox's cookies"
+  await $.command.run(SHORTS)
+  await settle()
+  expect(asked).toHaveLength(1)
+  expect(value).toEqual(expect.objectContaining({ status: 'error', message: expect.stringContaining(feedError) }))
+  expect(value).toEqual(expect.objectContaining({ message: expect.stringContaining('/shorts browser') }))
+
+  // `/shorts browser` asks again, the browser in use first.
+  await $.command.run({ ...SHORTS, args: 'browser' })
+  await settle()
+  expect(asked[1]?.options).toEqual(['Firefox', 'Chrome', 'Safari', 'Edge'])
+})

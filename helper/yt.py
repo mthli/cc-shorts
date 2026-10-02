@@ -21,8 +21,13 @@ scrolling. A missing or dead token starts over from the home page's Shorts
 shelf; when the sequence API gives nothing at all, the subscriptions Shorts
 feed is the fallback (and the token comes back null).
 
-Cookies come from Chrome through yt-dlp. Run with the Python of the
-pipx-installed yt-dlp (the system python3 has no yt_dlp):
+Cookies come through yt-dlp from the browser CC_SHORTS_BROWSER names, in
+yt-dlp's words (chrome, safari, firefox, edge, brave...), Chrome's when it is
+unset; one it cannot read, and a `feed` it finds signed out, exit saying so.
+
+Run with a Python that has yt_dlp, the one an installed yt-dlp runs on (the
+system python3 has none); the mod finds it at startup by the `#!` line of the
+`yt-dlp` on the PATH:
     ~/.local/pipx/venvs/yt-dlp/bin/python helper/yt.py feed <<< '{"want": 10}'
 """
 
@@ -33,6 +38,7 @@ import sys
 import yt_dlp
 import yt_dlp.cookies
 
+BROWSER = os.environ.get('CC_SHORTS_BROWSER') or 'chrome'
 HOME = 'https://www.youtube.com/'
 SUBSCRIPTIONS = 'https://www.youtube.com/feed/subscriptions/shorts'
 # One batch is ~15 Shorts: never pull more than this many per call, so the
@@ -60,7 +66,7 @@ yt_dlp.cookies._find_files = _profile_files
 def ydl(cookies=True, **params):
     base = {'quiet': True, 'no_warnings': True, 'noprogress': True}
     if cookies:
-        base['cookiesfrombrowser'] = ('chrome',)
+        base['cookiesfrombrowser'] = (BROWSER,)
     return yt_dlp.YoutubeDL({**base, **params})
 
 
@@ -70,9 +76,37 @@ def short_url(video_id):
 
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
-    out = {'feed': feed, 'download': download, 'watched': watched, 'like': like, 'unlike': unlike}[cmd](*args)
+    try:
+        out = {'feed': feed, 'download': download, 'watched': watched, 'like': like, 'unlike': unlike}[cmd](*args)
+    except yt_dlp.utils.YoutubeDLError as err:
+        cause = cookie_failure(err)
+        if cause is None:
+            raise
+        # Safari keeps its cookies where only an app with Full Disk Access
+        # reads (Files & Folders does not reach them); the other browsers'
+        # folders need no grant at all.
+        if BROWSER == 'safari' and isinstance(cause, PermissionError):
+            cause = (
+                'give the terminal Full Disk Access in System Settings > Privacy & Security, '
+                'or pick a browser that needs none with /shorts browser'
+            )
+        sys.exit(f"cannot read {BROWSER}'s cookies: {cause}")
     json.dump(out, sys.stdout)
     print()
+
+
+def cookie_failure(err):
+    """What failed reading the browser's cookies, if that is what `err` came of; else None.
+
+    yt-dlp reports it as a DownloadError raised while handling a
+    CookieLoadError ("failed to load cookies"), itself raised while handling
+    what failed.
+    """
+    while err is not None:
+        if isinstance(err, yt_dlp.cookies.CookieLoadError):
+            return err.__context__ or err
+        err = err.__context__
+    return None
 
 
 def feed():
@@ -93,6 +127,9 @@ def feed():
             print(f'feed: home sequence failed: {err}', file=sys.stderr)
             token = None
     if not f.ids:
+        # The subscriptions need a login too, and the home page signed out has no Shorts.
+        if not f.logged_in:
+            sys.exit(f"signed out: no YouTube login in {BROWSER}'s cookies")
         source, token = 'subscriptions', None
         f.from_subscriptions()
     return {'ids': f.ids, 'token': token, 'source': source, 'loggedIn': f.logged_in}

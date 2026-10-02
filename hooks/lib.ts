@@ -1,5 +1,6 @@
 // The pure parts of the player: sizes, the ffmpeg command, its progress
-// output, and frames as Raster cells. No `$` here, so tests reach all of it.
+// output, frames as Raster cells, and the words of the setup check. No `$`
+// here, so tests reach all of it.
 
 import type { Frame, Mode } from '../types'
 
@@ -125,4 +126,126 @@ export function clockTime(seconds: number): string {
 /** The JSON a helper command printed: its last line. */
 export function lastLine(text: string): string {
   return text.trim().split('\n').pop() ?? ''
+}
+
+// --- setup -------------------------------------------------------------------
+
+/** Something `/shorts` needs that the setup check could not find, or use. */
+export type Missing = {
+  /** What the person knows it by. */
+  name: string
+  /** Why it counts as missing, for Claude to start from. */
+  why: string
+  /** The Homebrew formula that brings it. */
+  formula: string
+  /** Shorts play without it, only worse. */
+  isOptional?: boolean
+}
+
+/** The interpreter a script's `#!` line names, `env` looked through; undefined when it names none. */
+export function shebangPython(firstLine: string): string | undefined {
+  const [exe, ...rest] = firstLine.startsWith('#!') ? firstLine.slice(2).trim().split(/\s+/) : []
+  return (exe?.endsWith('/env') ? rest.find(word => !word.startsWith('-')) : exe) || undefined
+}
+
+/** `['a', 'b', 'c']` as `a, b and c`. */
+export function nameList(names: string[]): string {
+  return names.length < 2 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+}
+
+/** The `brew install` that brings everything in `missing`. */
+export function brewCommand(missing: Missing[]): string {
+  return `brew install ${[...new Set(missing.map(m => m.formula))].join(' ')}`
+}
+
+const isNeeded = (missing: Missing[]) => missing.filter(m => !m.isOptional)
+
+/** What a session starts with while something is missing; undefined when nothing is. */
+export function setupToast(missing: Missing[]): string | undefined {
+  if (missing.length === 0) return undefined
+  const lacks = `cc-shorts: ${nameList(missing.map(m => m.name))} ${missing.length > 1 ? 'are' : 'is'} missing`
+  // Only deno is optional: yt-dlp solves YouTube's JS challenges with it.
+  if (isNeeded(missing).length === 0) return `${lacks}, so yt-dlp may miss formats; ${brewCommand(missing)}`
+  return `${lacks}; /shorts offers to install ${missing.length > 1 ? 'them' : 'it'}`
+}
+
+/** What `/shorts` asks while something it needs is missing. */
+export function installQuestion(missing: Missing[], hasBrew: boolean): string {
+  const optional = missing.filter(m => m.isOptional).map(m => m.name)
+  const helps = optional.length > 0 ? ` (and ${nameList(optional)}, which helps)` : ''
+  const lacks = `cc-shorts is missing ${nameList(isNeeded(missing).map(m => m.name))}${helps}.`
+  if (!hasBrew) return `${lacks} Homebrew, which installs them, is missing too. Ask Claude to walk you through it?`
+  return `${lacks} Install with \`${brewCommand(missing)}\`?`
+}
+
+/** What Claude is asked once the person lets it install what is missing. */
+export function installPrompt(missing: Missing[], hasBrew: boolean): string {
+  const command = brewCommand(missing)
+  return [
+    'Install what the cc-shorts plugin is missing on this Mac:',
+    ...missing.map(m => `- ${m.name}: ${m.why}`),
+    '',
+    hasBrew
+      ? `Run \`${command}\`. It can take several minutes: give it a long timeout.`
+      : 'Homebrew is missing too. Do not install it yourself: its installer asks for my password, so tell me to ' +
+        `run the one from https://brew.sh in my own terminal, then run \`${command}\` once it is in.`,
+    "cc-shorts runs these from Claude Code's PATH: if one is installed already, find out why it cannot see it.",
+    // Homebrew 7 warns about every untrusted tap on an install, with the
+    // `brew trust` and `brew untap` lines that would silence it.
+    'Each formula is in homebrew/core, which needs no tap trust. A warning that other taps are not trusted does ' +
+      'not stop the install and is not about it: leave it, and run no `brew trust` or `brew untap`.',
+    'If brew needs sudo, a password or anything else from me, stop and tell me what it said.',
+    'When it is done, tell me to run /shorts again.',
+  ].join('\n')
+}
+
+// --- the browser -------------------------------------------------------------
+
+/**
+ * A browser yt-dlp reads cookies from on macOS: yt-dlp's name for it, the
+ * person's, and its folder under `~/Library/Application Support`, there once
+ * it has been used here.
+ */
+export type Browser = { id: string; name: string; dir?: string }
+
+/** Every browser yt-dlp reads, the likeliest first. Safari has no folder to look for: every Mac has it. */
+export const BROWSERS: readonly Browser[] = [
+  { id: 'chrome', name: 'Chrome', dir: 'Google/Chrome' },
+  { id: 'safari', name: 'Safari' },
+  { id: 'edge', name: 'Edge', dir: 'Microsoft Edge' },
+  { id: 'firefox', name: 'Firefox', dir: 'Firefox/Profiles' },
+  { id: 'brave', name: 'Brave', dir: 'BraveSoftware/Brave-Browser' },
+  { id: 'opera', name: 'Opera', dir: 'com.operasoftware.Opera' },
+  { id: 'vivaldi', name: 'Vivaldi', dir: 'Vivaldi' },
+  { id: 'chromium', name: 'Chromium', dir: 'Chromium' },
+  { id: 'whale', name: 'Whale', dir: 'Naver/Whale' },
+]
+
+/** The browser an answer names, by either name, or within it (`Google Chrome`); undefined for one yt-dlp cannot read. */
+export function findBrowser(answer: string): Browser | undefined {
+  const said = answer.trim().toLowerCase()
+  if (said === '') return undefined
+  return (
+    BROWSERS.find(b => said === b.id || said === b.name.toLowerCase()) ??
+    BROWSERS.find(b => said.split(/\s+/).includes(b.id))
+  )
+}
+
+/** The browser question's choices: the browsers here, the one in use first, four at most (the dialog's limit). */
+export function browserOptions(here: readonly Browser[], current: string): string[] {
+  return [...here.filter(b => b.id === current), ...here.filter(b => b.id !== current)].slice(0, 4).map(b => b.name)
+}
+
+/**
+ * The browser question, naming the browsers here that do not fit in its
+ * choices, and what Safari's cookies cost: macOS lets only an app with Full
+ * Disk Access read them, and that app is the terminal, for all it runs.
+ */
+export function browserQuestion(here: readonly Browser[], current: string): string {
+  const offered = browserOptions(here, current)
+  const others = here.filter(b => !offered.includes(b.name)).map(b => b.name)
+  const [are, it] = others.length > 1 ? ['are', 'one'] : ['is', 'it']
+  const more = others.length > 0 ? ` ${nameList(others)} ${are} here too: type ${it}.` : ''
+  const safari = offered.includes('Safari') ? " Safari's need Full Disk Access for the terminal." : ''
+  return `Which browser are you signed in to YouTube with? cc-shorts reads your feed through its cookies.${more}${safari}`
 }

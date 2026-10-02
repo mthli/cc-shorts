@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cc-shorts",
+  "description": "Scroll your YouTube Shorts feed in a Claude Code pane",
+  "owner": {
+    "name": "Matthew Lee"
+  },
+  "plugins": [
+    {
+      "name": "cc-shorts",
+      "description": "Scroll your YouTube Shorts feed in a Claude Code pane (macOS, in the terminal)",
+      "author": {
+        "name": "Matthew Lee"
+      },
+      "source": "./",
+      "homepage": "https://github.com/mthli/cc-shorts"
+    }
+  ]
+}

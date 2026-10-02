@@ -2,11 +2,21 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   blankCells,
+  brewCommand,
+  BROWSERS,
+  browserOptions,
+  browserQuestion,
   CHROME_ROWS,
   clockTime,
   ffmpegArgs,
+  findBrowser,
   frameSize,
+  installPrompt,
+  installQuestion,
+  nameList,
   parseProgress,
+  setupToast,
+  shebangPython,
   toCells,
   videoBox,
 } from '../hooks/lib'
@@ -90,4 +100,87 @@ describe('toCells', () => {
 test('clockTime', async () => {
   expect(clockTime(0)).toBe('0:00')
   expect(clockTime(75.9)).toBe('1:15')
+})
+
+describe('setup', () => {
+  const ytdlp = { name: 'yt-dlp', why: 'no Python that imports yt_dlp', formula: 'yt-dlp' }
+  const ffmpeg = { name: 'ffmpeg', why: 'not found', formula: 'ffmpeg' }
+  const deno = { name: 'deno', why: 'not found', formula: 'deno', isOptional: true }
+
+  test('shebangPython: the interpreter, through env, or none', async () => {
+    expect(shebangPython('#!/Users/a/.local/pipx/venvs/yt-dlp/bin/python -E')).toBe(
+      '/Users/a/.local/pipx/venvs/yt-dlp/bin/python',
+    )
+    expect(shebangPython('#!/usr/bin/env python3')).toBe('python3')
+    expect(shebangPython('#!/usr/bin/env -S python3 -E')).toBe('python3')
+    expect(shebangPython('#!')).toBeUndefined()
+    expect(shebangPython('Ïúíþ binary')).toBeUndefined()
+  })
+
+  test('nameList', async () => {
+    expect(nameList(['a'])).toBe('a')
+    expect(nameList(['a', 'b'])).toBe('a and b')
+    expect(nameList(['a', 'b', 'c'])).toBe('a, b and c')
+  })
+
+  test('brewCommand: each formula once', async () => {
+    expect(brewCommand([ytdlp, ffmpeg, { ...ffmpeg, why: 'no audiotoolbox' }])).toBe('brew install yt-dlp ffmpeg')
+  })
+
+  test('setupToast: nothing missing says nothing; deno alone gets its command', async () => {
+    expect(setupToast([])).toBeUndefined()
+    expect(setupToast([deno])).toBe('cc-shorts: deno is missing, so yt-dlp may miss formats; brew install deno')
+    expect(setupToast([ffmpeg])).toBe('cc-shorts: ffmpeg is missing; /shorts offers to install it')
+  })
+
+  test('installQuestion: the command, or Homebrew first', async () => {
+    expect(installQuestion([ffmpeg, deno], true)).toBe(
+      'cc-shorts is missing ffmpeg (and deno, which helps). Install with `brew install ffmpeg deno`?',
+    )
+    expect(installQuestion([ytdlp, ffmpeg], false)).toContain('Homebrew')
+  })
+
+  test('installPrompt: why each is missing, what to run, and Homebrew left to the person', async () => {
+    const withBrew = installPrompt([ffmpeg, deno], true)
+    expect(withBrew).toContain('- ffmpeg: not found')
+    expect(withBrew).toContain('Run `brew install ffmpeg deno`')
+    // Homebrew's untrusted-tap warning is for the person to weigh, not Claude.
+    expect(withBrew).toContain('run no `brew trust` or `brew untap`')
+    expect(withBrew).toContain('stop and tell me what it said')
+    const noBrew = installPrompt([ffmpeg], false)
+    expect(noBrew).toContain('Do not install it yourself')
+    expect(noBrew).toContain('then run `brew install ffmpeg` once it is in')
+  })
+})
+
+describe('the browser', () => {
+  const named = (...ids: string[]) => BROWSERS.filter(b => ids.includes(b.id))
+
+  test('findBrowser: by either name, within a longer one, or none', async () => {
+    expect(findBrowser('Firefox')?.id).toBe('firefox')
+    expect(findBrowser(' edge ')?.id).toBe('edge')
+    expect(findBrowser('Google Chrome')?.id).toBe('chrome')
+    expect(findBrowser('Microsoft Edge')?.id).toBe('edge')
+    expect(findBrowser('chromium')?.id).toBe('chromium')
+    expect(findBrowser('Arc')).toBeUndefined()
+    expect(findBrowser('')).toBeUndefined()
+  })
+
+  test('browserOptions: the one in use first, four at most', async () => {
+    const here = named('chrome', 'safari', 'edge', 'firefox', 'brave')
+    expect(browserOptions(here, '')).toEqual(['Chrome', 'Safari', 'Edge', 'Firefox'])
+    expect(browserOptions(here, 'brave')).toEqual(['Brave', 'Chrome', 'Safari', 'Edge'])
+  })
+
+  test('browserQuestion: names the browsers here that the choices leave out', async () => {
+    expect(browserQuestion(named('chrome', 'safari'), '')).not.toContain('here too')
+    expect(browserQuestion(named('chrome', 'safari'), '')).toContain("Safari's need Full Disk Access")
+    expect(browserQuestion(named('chrome', 'edge'), '')).not.toContain('Full Disk Access')
+    expect(browserQuestion(named('chrome', 'safari', 'edge', 'firefox', 'brave'), '')).toContain(
+      'Brave is here too: type it.',
+    )
+    expect(browserQuestion(named('chrome', 'safari', 'edge', 'firefox', 'brave', 'opera'), '')).toContain(
+      'Brave and Opera are here too: type one.',
+    )
+  })
 })
