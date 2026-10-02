@@ -180,7 +180,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'shorts',
-      description: 'Scroll your YouTube Shorts feed in a side pane',
+      description: 'Play YouTube Shorts in your Claude Code',
       argumentHint: '[browser]',
     })
     // Downloads of sessions that ended without cleaning up (a crash).

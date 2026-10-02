@@ -1,8 +1,8 @@
 # cc-shorts
 
-Play YouTube Shorts in your Claude Code 💃
+![](screenshot.png)
 
-`/shorts` opens a pane beside the conversation and plays your own Shorts feed in it, with sound, while Claude keeps working.
+`/shorts` Play YouTube Shorts in your Claude Code 💃
 
 > **Early.** cc-shorts works on Claude Code 2.1.287, the one version tested so far. It runs on hooks modules, an early-access plugin API that changes between releases, so another version may fail to load it.
 
