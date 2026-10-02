@@ -1,7 +1,7 @@
 {
   "name": "cc-shorts",
   "version": "0.1.0",
-  "description": "Scroll your YouTube Shorts feed in a Claude Code pane",
+  "description": "Play YouTube Shorts in your Claude Code",
   "author": {
     "name": "Matthew Lee"
   },
