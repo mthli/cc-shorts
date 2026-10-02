@@ -23,6 +23,7 @@ Cookies come from Chrome through yt-dlp. Run with the Python of the
 pipx-installed yt-dlp (the system python3 has no yt_dlp):
     ~/.local/pipx/venvs/yt-dlp/bin/python helper/yt.py feed <<< '{"want": 10}'
 """
+
 import json
 import os
 import sys
@@ -65,29 +66,34 @@ def short_url(video_id):
     return f'https://www.youtube.com/shorts/{video_id}'
 
 
-def find_all(obj, key):
-    """Yield every value stored under `key` anywhere in a JSON tree."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k == key:
-                yield v
-            yield from find_all(v, key)
-    elif isinstance(obj, list):
-        for v in obj:
-            yield from find_all(v, key)
+def main():
+    cmd, args = sys.argv[1], sys.argv[2:]
+    out = {'feed': feed, 'download': download, 'watched': watched}[cmd](*args)
+    json.dump(out, sys.stdout)
+    print()
 
 
-def find_strings(obj, key):
-    return [v for v in find_all(obj, key) if isinstance(v, str)]
-
-
-def video_ids(obj):
-    """The videoIds of every reelWatchEndpoint in `obj`, in order, once each."""
-    ids = []
-    for ep in find_all(obj, 'reelWatchEndpoint'):
-        if isinstance(ep, dict) and isinstance(ep.get('videoId'), str) and ep['videoId'] not in ids:
-            ids.append(ep['videoId'])
-    return ids
+def feed():
+    req = json.load(sys.stdin)
+    f = Feed(set(req.get('seen') or []), max(1, int(req.get('want') or 10)))
+    token, source = req.get('token'), 'sequence'
+    if token:
+        try:
+            token = f.scroll(token)
+        except Exception as err:  # noqa: BLE001  a dead token reads as any API error
+            print(f'feed: token failed, starting over: {err}', file=sys.stderr)
+            token = None
+    if not f.ids:
+        source = 'home'
+        try:
+            token = f.from_home()
+        except Exception as err:  # noqa: BLE001
+            print(f'feed: home sequence failed: {err}', file=sys.stderr)
+            token = None
+    if not f.ids:
+        source, token = 'subscriptions', None
+        f.from_subscriptions()
+    return {'ids': f.ids, 'token': token, 'source': source, 'loggedIn': f.logged_in}
 
 
 class Feed:
@@ -99,17 +105,6 @@ class Feed:
         self.page = self.ie._download_webpage(HOME, 'home', note=False)
         self.ytcfg = self.ie.extract_ytcfg('home', self.page)
         self.logged_in = bool(self.ytcfg.get('LOGGED_IN'))
-
-    def call(self, endpoint, body):
-        return self.ie._call_api(
-            endpoint, body, 'feed', note=False,
-            context=self.ytcfg.get('INNERTUBE_CONTEXT'),
-            headers=self.ie.generate_api_headers(ytcfg=self.ytcfg))
-
-    def add(self, ids):
-        for i in ids:
-            if i not in self.seen and i not in self.ids:
-                self.ids.append(i)
 
     def scroll(self, token):
         """Pull sequence batches from `token`; returns the token after the last."""
@@ -136,7 +131,10 @@ class Feed:
         self.add(seeds)
         seed = next(iter(seeds.values()))
         body = {
-            'playerRequest': {'videoId': seed['videoId'], **({'params': seed['playerParams']} if seed.get('playerParams') else {})},
+            'playerRequest': {
+                'videoId': seed['videoId'],
+                **({'params': seed['playerParams']} if seed.get('playerParams') else {}),
+            },
             'disablePlayerResponse': True,
         }
         if seed.get('params'):
@@ -151,28 +149,45 @@ class Feed:
         info = ydl(extract_flat=True, playlist_items='1:30').extract_info(SUBSCRIPTIONS, download=False)
         self.add(e['id'] for e in info.get('entries') or [] if isinstance(e, dict) and e.get('id'))
 
+    def call(self, endpoint, body):
+        return self.ie._call_api(
+            endpoint,
+            body,
+            'feed',
+            note=False,
+            context=self.ytcfg.get('INNERTUBE_CONTEXT'),
+            headers=self.ie.generate_api_headers(ytcfg=self.ytcfg),
+        )
 
-def feed():
-    req = json.load(sys.stdin)
-    f = Feed(set(req.get('seen') or []), max(1, int(req.get('want') or 10)))
-    token, source = req.get('token'), 'sequence'
-    if token:
-        try:
-            token = f.scroll(token)
-        except Exception as err:  # noqa: BLE001  a dead token reads as any API error
-            print(f'feed: token failed, starting over: {err}', file=sys.stderr)
-            token = None
-    if not f.ids:
-        source = 'home'
-        try:
-            token = f.from_home()
-        except Exception as err:  # noqa: BLE001
-            print(f'feed: home sequence failed: {err}', file=sys.stderr)
-            token = None
-    if not f.ids:
-        source, token = 'subscriptions', None
-        f.from_subscriptions()
-    return {'ids': f.ids, 'token': token, 'source': source, 'loggedIn': f.logged_in}
+    def add(self, ids):
+        for i in ids:
+            if i not in self.seen and i not in self.ids:
+                self.ids.append(i)
+
+
+def video_ids(obj):
+    """The videoIds of every reelWatchEndpoint in `obj`, in order, once each."""
+    ids = []
+    for ep in find_all(obj, 'reelWatchEndpoint'):
+        if isinstance(ep, dict) and isinstance(ep.get('videoId'), str) and ep['videoId'] not in ids:
+            ids.append(ep['videoId'])
+    return ids
+
+
+def find_strings(obj, key):
+    return [v for v in find_all(obj, key) if isinstance(v, str)]
+
+
+def find_all(obj, key):
+    """Yield every value stored under `key` anywhere in a JSON tree."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key:
+                yield v
+            yield from find_all(v, key)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from find_all(v, key)
 
 
 def download(video_id, folder):
@@ -202,13 +217,6 @@ def download(video_id, folder):
 def watched(video_id):
     ydl(mark_watched=True, simulate=True, skip_download=True).extract_info(short_url(video_id), download=False)
     return {'id': video_id}
-
-
-def main():
-    cmd, args = sys.argv[1], sys.argv[2:]
-    out = {'feed': feed, 'download': download, 'watched': watched}[cmd](*args)
-    json.dump(out, sys.stdout)
-    print()
 
 
 if __name__ == '__main__':

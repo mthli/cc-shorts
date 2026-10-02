@@ -9,6 +9,7 @@ Run with the Python of the pipx-installed yt-dlp:
     ~/.local/pipx/venvs/yt-dlp/bin/python docs/probe_reel.py
 Needs YouTube logged in on Chrome (cookies are read via yt-dlp).
 """
+
 import json
 import os
 import sys
@@ -78,7 +79,10 @@ def call(ep, body, name):
 # Step 2
 seed = seeds[0]
 item_body = {
-    'playerRequest': {'videoId': seed['videoId'], **({'params': seed['playerParams']} if seed.get('playerParams') else {})},
+    'playerRequest': {
+        'videoId': seed['videoId'],
+        **({'params': seed['playerParams']} if seed.get('playerParams') else {}),
+    },
     'disablePlayerResponse': True,
 }
 if seed.get('params'):
@@ -113,6 +117,5 @@ for batch in range(3):
         break
     seq_params = nxt[0]
 
-json.dump({'seeds': [s['videoId'] for s in seeds], 'sequence': all_ids},
-          open(os.path.join(OUT, 'ids.json'), 'w'))
+json.dump({'seeds': [s['videoId'] for s in seeds], 'sequence': all_ids}, open(os.path.join(OUT, 'ids.json'), 'w'))
 print('total new ids from sequence:', len(all_ids))

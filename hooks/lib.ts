@@ -46,8 +46,10 @@ export function frameSize(mode: Mode, box: Box): { width: number; height: number
 export function ffmpegArgs(o: { path: string; start: number; mode: Mode; frame: Frame; isMuted: boolean }): string[] {
   const { width: w, height: h } = o.frame
   const fit = `scale=${w}:${h}:force_original_aspect_ratio=decrease:flags=${o.mode === 'raster' ? 'area' : 'bilinear'},pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`
-  const palette = 'split[a][b];[a]palettegen=max_colors=32:stats_mode=single:reserve_transparent=0[p];[b][p]paletteuse=new=1:dither=none'
+  const palette =
+    'split[a][b];[a]palettegen=max_colors=32:stats_mode=single:reserve_transparent=0[p];[b][p]paletteuse=new=1:dither=none'
   const filter = o.mode === 'raster' ? `${fit},${palette},format=rgb24` : `${fit},format=rgb24`
+  // prettier-ignore
   return [
     'ffmpeg', '-hide_banner', '-nostdin', '-loglevel', 'error',
     '-progress', 'pipe:1', '-stats_period', '0.25',

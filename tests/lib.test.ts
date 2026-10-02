@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { blankCells, CHROME_ROWS, clockTime, ffmpegArgs, frameSize, parseProgress, toCells, videoBox } from '../hooks/lib'
+import {
+  blankCells,
+  CHROME_ROWS,
+  clockTime,
+  ffmpegArgs,
+  frameSize,
+  parseProgress,
+  toCells,
+  videoBox,
+} from '../hooks/lib'
 
 describe('videoBox', () => {
   test('a tall pane: the width decides, 9 columns to 8 rows', async () => {
