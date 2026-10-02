@@ -262,6 +262,12 @@ async function follow($: EngineInterface, p: Player, short: Short) {
   await setShorts($, s => ({ ...s, status: 'error', pos: p.pos, message: `播放出错：${lastLine(p.stderr) || '未知原因'}（j 下一条）` }))
 }
 
+/** The frame file as Raster cells; rejects while it is not written. */
+async function frameCells($: EngineInterface, frame: Frame): Promise<string> {
+  const { base64 } = await $.fs.read(frame.file, { as: 'bytes' })
+  return toCells(Uint8Array.fromBase64(base64), frame.columns, frame.rows)
+}
+
 /** Puts ffmpeg's newest frame on screen; one at a time, about 30 a second. */
 async function tick($: EngineInterface) {
   const p = player
@@ -280,8 +286,7 @@ async function tick($: EngineInterface) {
       result = await $.ui.blit({ requestId: PANE, key: VIDEO, source })
       if (!result.deny) lastSource = source
     } else {
-      const { base64 } = await $.fs.read(p.frame.file, { as: 'bytes' })
-      const cells = toCells(Uint8Array.fromBase64(base64), p.frame.columns, p.frame.rows)
+      const cells = await frameCells($, p.frame)
       result = await $.ui.blit({ requestId: PANE, key: VIDEO, cells })
       if (!result.deny) lastCells = cells
     }
@@ -359,7 +364,14 @@ export const register: Register = on => {
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     const s = await read($, shorts)
     if (isOpen && (s.status === 'playing' || s.status === 'loading')) void play($, s.pos)
-    else if (!isOpen && s.status !== 'idle') await shutDown($)
+    else if (isOpen && s.status === 'paused' && s.mode === 'raster' && s.frame) {
+      // The cells on screen went with the old module; the paused frame's
+      // file is still there to draw them again.
+      void frameCells($, s.frame).then(cells => {
+        lastCells = cells
+        $.ui.invalidate('ui.render')
+      }, () => undefined)
+    } else if (!isOpen && s.status !== 'idle') await shutDown($)
     return started
   })
 
