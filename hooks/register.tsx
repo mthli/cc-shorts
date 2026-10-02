@@ -16,7 +16,7 @@ import type { Box } from './lib'
 const PANE = 'shorts'
 const VIDEO = 'video'
 /** Videos kept downloaded ahead of the one playing. */
-const PRELOAD = 2
+const PRELOAD = 5
 /** Refill the queue when this few are left after the one playing. */
 const LOW_WATER = 5
 /** How many watched ids `$.store` keeps, so the feed skips them. */
@@ -75,7 +75,9 @@ let layout: Box | undefined
 let lastSource: ImageSource | undefined
 let lastCells: string | undefined
 let refilling: Promise<void> | undefined
-let downloadChain: Promise<unknown> = Promise.resolve()
+/** Downloads not started yet, in the order they start (`download`). */
+const waiting: { id: string; start: () => Promise<void>; drop: () => void }[] = []
+let isDownloading = false
 let likeChain: Promise<unknown> = Promise.resolve()
 /** Downloads failed in a row: past a few, the network is down, not the video. */
 let failures = 0
@@ -295,7 +297,12 @@ async function play($: EngineInterface, from = 0) {
   if (s.shorts[id]?.path === undefined) {
     await setShorts($, s => ({ ...s, status: 'loading', message: 'Downloading…' }))
   }
-  const short = await download($, id)
+  // Skipped on from already: what plays now goes first, not this one.
+  if (my !== epoch) return
+  // Waiting since before a skip, and no longer next: those never start.
+  const near = nextFew(s)
+  dropWaiting(id => near.includes(id))
+  const short = await download($, id, true)
   if (my !== epoch) return
   if (short?.path === undefined) {
     if (++failures >= 3) {
@@ -480,37 +487,67 @@ async function markSeen($: EngineInterface, id: string) {
 
 // --- downloads ---------------------------------------------------------------
 
-/** The Short downloaded, once; downloads run one after another. */
-function download($: EngineInterface, id: string): Promise<Short | undefined> {
+/**
+ * The Short downloaded, once. Downloads run one after another in the order
+ * asked, except that an `isUrgent` one (the Short to play now) goes ahead of
+ * every one still waiting; the one already running finishes first.
+ */
+function download($: EngineInterface, id: string, isUrgent = false): Promise<Short | undefined> {
+  const at = waiting.findIndex(job => job.id === id)
+  if (isUrgent && at > 0) waiting.unshift(...waiting.splice(at, 1))
   const known = downloads.get(id)
   if (known) return known
-  const job = downloadChain.then(async () => {
-    try {
-      const had = (await read($, shorts)).shorts[id]
-      if (had?.path !== undefined && (await $.fs.exists(had.path))) return had
-      const short = await helper<Short>($, 'yt.py', ['download', id, dir], undefined, 180_000)
-      if (short === undefined) return undefined
-      await setShorts($, s => ({ ...s, shorts: { ...s.shorts, [id]: short } }))
-      return short
-    } catch (err) {
-      log($, `download ${id}: ${String(err)}`)
-      return undefined
-    }
+  const job = new Promise<Short | undefined>(resolve => {
+    const entry = { id, start: () => fetchShort($, id).then(resolve), drop: () => resolve(undefined) }
+    if (isUrgent) waiting.unshift(entry)
+    else waiting.push(entry)
   })
-  downloadChain = job
   downloads.set(id, job)
   // A failure may pass (a network blip): let a later ask try again.
   void job.then(short => {
-    if (short === undefined) downloads.delete(id)
+    if (short === undefined && downloads.get(id) === job) downloads.delete(id)
   })
+  void downloadNext()
   return job
 }
+
+/** Starts the downloads waiting, one at a time, until none is left. */
+async function downloadNext() {
+  if (isDownloading) return
+  isDownloading = true
+  for (let job = waiting.shift(); job !== undefined; job = waiting.shift()) await job.start()
+  isDownloading = false
+}
+
+/** Takes each download waiting whose Short `keep` turns down out of line: it never starts. */
+function dropWaiting(keep: (id: string) => boolean) {
+  const dropped = waiting.filter(job => !keep(job.id))
+  waiting.splice(0, waiting.length, ...waiting.filter(job => keep(job.id)))
+  for (const job of dropped) job.drop()
+}
+
+async function fetchShort($: EngineInterface, id: string): Promise<Short | undefined> {
+  try {
+    const had = (await read($, shorts)).shorts[id]
+    if (had?.path !== undefined && (await $.fs.exists(had.path))) return had
+    const short = await helper<Short>($, 'yt.py', ['download', id, dir], undefined, 180_000)
+    if (short === undefined) return undefined
+    await setShorts($, s => ({ ...s, shorts: { ...s.shorts, [id]: short } }))
+    return short
+  } catch (err) {
+    log($, `download ${id}: ${String(err)}`)
+    return undefined
+  }
+}
+
+/** The Short at `cur` and the PRELOAD after it. */
+const nextFew = (s: Shorts) => s.queue.slice(s.cur, s.cur + 1 + PRELOAD)
 
 /** Keeps the next few downloaded, the queue long enough, and old files gone. */
 async function prepare($: EngineInterface) {
   const s = await read($, shorts)
   if (s.queue.length - s.cur - 1 <= LOW_WATER) void refill($)
-  for (const id of s.queue.slice(s.cur + 1, s.cur + 1 + PRELOAD)) void download($, id)
+  for (const id of nextFew(s).slice(1)) void download($, id)
   // One behind stays for `k`; the rest are deleted.
   const old = s.queue.slice(0, Math.max(0, s.cur - 1)).filter(id => s.shorts[id]?.path !== undefined)
   if (old.length === 0) return
@@ -592,6 +629,8 @@ function withLike(liked: string[] | undefined, id: string, isLiked: boolean): st
 async function shutDown($: EngineInterface) {
   epoch++
   stopPlayer()
+  // What has not started never does: the folder it would land in goes below.
+  dropWaiting(() => false)
   downloads.clear()
   layout = undefined
   await setShorts($, s => ({

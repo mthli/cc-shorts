@@ -79,6 +79,74 @@ test('replay plays the Short on screen again from the start', async ($, on) => {
   await ui.unmount()
 })
 
+test('the Short to play downloads first, and skipped or closed ones never do', async ($, on) => {
+  const clock = mock.clock(on)
+  // Each download takes a second of the mocked clock, so the test says when it ends.
+  const started: string[] = []
+  on('process.run', async (_, e) => {
+    const at = e.argv.indexOf('download')
+    let stdout = ''
+    if (at >= 0) {
+      const id = e.argv[at + 1] ?? ''
+      started.push(id)
+      await clock.sleep(1000)
+      stdout = JSON.stringify({
+        id,
+        title: id,
+        author: 'Someone',
+        duration: 30,
+        hasAudio: true,
+        path: `/tmp/${id}.mp4`,
+      })
+    }
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* () {
+    return { value: { code: 1, signal: null } }
+  })
+  mock.store(on)
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.close', () => ({ value: undefined }))
+  // A dozen queued, so the queue needs no refill; none downloaded yet.
+  const queue = 'abcdefghijkl'.split('')
+  let value: unknown = { ...EMPTY, queue }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  // What `session.start` asks of the session, for the helper's path.
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'next' })
+  expect(started).toEqual(['b'])
+  // b is in: c starts, and d to g wait behind it.
+  await clock.advance(1000)
+  expect(started).toEqual(['b', 'c'])
+  // On to f while c is still coming: f goes ahead of d and e.
+  for (let i = 0; i < 4; i++) await ui.press({ key: 'next' })
+  expect(value).toEqual(expect.objectContaining({ cur: 5 }))
+  await clock.advance(1000)
+  expect(started).toEqual(['b', 'c', 'f'])
+  // f is in: g goes next, as d and e were dropped once skipped past.
+  await clock.advance(1000)
+  expect(started).toEqual(['b', 'c', 'f', 'g'])
+
+  // Closed while g is coming: nothing that waited starts after it.
+  await ui.press({ key: 'close' })
+  await clock.advance(5000)
+  expect(started).toEqual(['b', 'c', 'f', 'g'])
+  await ui.unmount()
+})
+
 test('likes: shown at once, put back when refused, every press counted', async ($, on) => {
   const argvs: (readonly string[])[] = []
   let exitCode = 0
