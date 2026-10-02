@@ -33,19 +33,19 @@ import type { Box, Missing } from './lib'
 
 const PANE = 'shorts'
 const VIDEO = 'video'
-/** Videos kept downloaded ahead of the one playing. */
-const PRELOAD = 5
-/** Refill the queue when this few are left after the one playing. */
-const LOW_WATER = 5
-/** How many watched ids `$.store` keeps, so the feed skips them. */
-const SEEN_KEPT = 1000
-/** A Short counts as watched (and goes to the account's history) after this. */
-const WATCHED_SECONDS = 10
 /** The widest key the pane draws (`r: Replay`, `o: Open ↗`), and the space between keys. */
 const KEY_COLUMNS = 9
 const KEY_GAP = 2
 /** The answer to the setup question that hands the install to Claude. */
 const INSTALL = 'Ask Claude to install'
+/** A Short counts as watched (and goes to the account's history) after this. */
+const WATCHED_SECONDS = 10
+/** How many watched ids `$.store` keeps, so the feed skips them. */
+const SEEN_KEPT = 1000
+/** Videos kept downloaded ahead of the one playing. */
+const PRELOAD = 5
+/** Refill the queue when this few are left after the one playing. */
+const LOW_WATER = 5
 
 const EMPTY: Shorts = {
   queue: [],
@@ -74,6 +74,13 @@ type Player = {
 // ffmpeg and cancels the timers with it, and `session.start` picks up again
 // from `shorts`, which the host keeps.
 let dir = ''
+/** The box the pane last drew the picture in, from the render hook. */
+let layout: Box | undefined
+/** What the picture shows now, so a redraw draws the same. */
+let lastSource: ImageSource | undefined
+let lastCells: string | undefined
+/** What `shorts` held when a /clear began, for the session after it. */
+let carried: Shorts | undefined
 /** The Python that runs `helper/`, one that has yt_dlp; '' until the setup check finds it. */
 let python = ''
 /** The last setup check, which names `python`: a helper waits for it. */
@@ -85,12 +92,12 @@ let isSetUp = false
  * chose it (kept in `$.store`); '' until they do, and `yt.py` reads Chrome's.
  */
 let browser = ''
-let player: Player | undefined
-let ticker: Timer | undefined
-let isBlitting = false
-let lastDeny = ''
 /** Bumped by every action that changes what plays; stale work checks it. */
 let epoch = 0
+let player: Player | undefined
+let ticker: Timer | undefined
+/** Downloads failed in a row: past a few, the network is down, not the video. */
+let failures = 0
 /**
  * Frame files are counted per load, so the load's start goes in their names
  * too: a reload counts from 1 again, and ffmpeg will not write over a file
@@ -98,26 +105,19 @@ let epoch = 0
  */
 const loadMark = Date.now().toString(36)
 let frameSeq = 0
+let isBlitting = false
 let generation = 0
-/** The box the pane last drew the picture in, from the render hook. */
-let layout: Box | undefined
-/** What the picture shows now, so a redraw draws the same. */
-let lastSource: ImageSource | undefined
-let lastCells: string | undefined
+let lastDeny = ''
+const marked = new Set<string>()
 let refilling: Promise<string | undefined> | undefined
 /** Downloads not started yet, in the order they start (`download`). */
 const waiting: { id: string; start: () => Promise<void>; drop: () => void }[] = []
 let isDownloading = false
-let likeChain: Promise<unknown> = Promise.resolve()
-/** Downloads failed in a row: past a few, the network is down, not the video. */
-let failures = 0
 const downloads = new Map<string, Promise<Short | undefined>>()
-const marked = new Set<string>()
-/** What `shorts` held when a /clear began, for the session after it. */
-let carried: Shorts | undefined
 /** Whether the pane held the keyboard at its last draw: each change acts once. */
 let hadKeys = false
 let keysChain: Promise<unknown> = Promise.resolve()
+let likeChain: Promise<unknown> = Promise.resolve()
 
 const log = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 const setShorts = ($: EngineInterface, change: (s: Shorts) => Shorts) => update($, shorts, change)
@@ -686,13 +686,6 @@ async function downloadNext() {
   isDownloading = false
 }
 
-/** Takes each download waiting whose Short `keep` turns down out of line: it never starts. */
-function dropWaiting(keep: (id: string) => boolean) {
-  const dropped = waiting.filter(job => !keep(job.id))
-  waiting.splice(0, waiting.length, ...waiting.filter(job => keep(job.id)))
-  for (const job of dropped) job.drop()
-}
-
 async function fetchShort($: EngineInterface, id: string): Promise<Short | undefined> {
   try {
     const had = (await read($, shorts)).shorts[id]
@@ -706,9 +699,6 @@ async function fetchShort($: EngineInterface, id: string): Promise<Short | undef
     return undefined
   }
 }
-
-/** The Short at `cur` and the PRELOAD after it. */
-const nextFew = (s: Shorts) => s.queue.slice(s.cur, s.cur + 1 + PRELOAD)
 
 /** Keeps the next few downloaded, the queue long enough, and old files gone. */
 async function prepare($: EngineInterface) {
@@ -727,88 +717,14 @@ async function prepare($: EngineInterface) {
   })
 }
 
-// --- what the keys do --------------------------------------------------------
+/** The Short at `cur` and the PRELOAD after it. */
+const nextFew = (s: Shorts) => s.queue.slice(s.cur, s.cur + 1 + PRELOAD)
 
-/** Plays the Short `by` along the queue from the start; 0 plays this one again. */
-async function skip($: EngineInterface, by: number) {
-  await setShorts($, s => ({ ...s, cur: Math.min(s.queue.length, Math.max(0, s.cur + by)), pos: 0 }))
-  void play($)
-}
-
-async function togglePause($: EngineInterface) {
-  const s = await read($, shorts)
-  if (s.status === 'paused') return void play($, s.pos)
-  await pause($)
-}
-
-async function pause($: EngineInterface) {
-  const p = player
-  if (p === undefined) return
-  epoch++
-  stopPlayer()
-  await setShorts($, s => ({ ...s, status: 'paused', pos: p.pos }))
-}
-
-/** Pauses here first, so the browser's copy is not heard over this one. */
-async function openInBrowser($: EngineInterface, id: string) {
-  await pause($)
-  await $.process.run(['open', `https://www.youtube.com/shorts/${id}`])
-}
-
-async function toggleMute($: EngineInterface) {
-  const s = await setShorts($, s => ({ ...s, muted: !s.muted }))
-  if (player !== undefined) void play($, player.pos)
-  $.ui.toast(s.muted ? 'cc-shorts: muted' : 'cc-shorts: unmuted')
-}
-
-/**
- * Likes the Short on screen, or takes the like back: the pane shows it at
- * once, and YouTube hears of it one call at a time (each about 6 s).
- */
-async function toggleLike($: EngineInterface) {
-  // Flipped inside the write: two presses landing together flip it twice.
-  const s = await setShorts($, s => {
-    const id = s.queue[s.cur]
-    return id === undefined ? s : { ...s, liked: withLike(s.liked, id, !hasLike(s, id)) }
-  })
-  const id = s.queue[s.cur]
-  if (id === undefined) return
-  const isLiked = hasLike(s, id)
-  likeChain = likeChain
-    .then(async () => {
-      // Pressed again since: that press sends its own.
-      if (hasLike(await read($, shorts), id) !== isLiked) return
-      if ((await helper($, 'yt.py', [isLiked ? 'like' : 'unlike', id], undefined, 60_000)) !== undefined) return
-      await setShorts($, s => (hasLike(s, id) === isLiked ? { ...s, liked: withLike(s.liked, id, !isLiked) } : s))
-      $.ui.toast(`cc-shorts: ${isLiked ? 'like' : 'unlike'} failed`)
-    })
-    .catch(err => log($, `like ${id}: ${String(err)}`))
-}
-
-const hasLike = (s: Shorts, id: string) => (s.liked ?? []).includes(id)
-
-function withLike(liked: string[] | undefined, id: string, isLiked: boolean): string[] {
-  const others = (liked ?? []).filter(i => i !== id)
-  return isLiked ? [...others, id] : others
-}
-
-/** Stops everything and deletes this session's downloads and frames. */
-async function shutDown($: EngineInterface) {
-  epoch++
-  stopPlayer()
-  // What has not started never does: the folder it would land in goes below.
-  dropWaiting(() => false)
-  downloads.clear()
-  layout = undefined
-  await setShorts($, s => ({
-    ...s,
-    status: 'idle',
-    frame: undefined,
-    shorts: Object.fromEntries(Object.entries(s.shorts).map(([id, short]) => [id, { ...short, path: undefined }])),
-  }))
-  // No draw sees the keyboard go: an idle pane holds none, a closed one draws no more.
-  await holdKeys($, false)
-  if (dir !== '') await $.process.run(['rm', '-rf', dir])
+/** Takes each download waiting whose Short `keep` turns down out of line: it never starts. */
+function dropWaiting(keep: (id: string) => boolean) {
+  const dropped = waiting.filter(job => !keep(job.id))
+  waiting.splice(0, waiting.length, ...waiting.filter(job => keep(job.id)))
+  for (const job of dropped) job.drop()
 }
 
 // --- the input source --------------------------------------------------------
@@ -843,4 +759,88 @@ async function giveBackInput($: EngineInterface) {
   if (inputSource === undefined) return
   await helper($, 'ime.py', ['select', inputSource], undefined, 5000)
   await setShorts($, s => ({ ...s, inputSource: undefined }))
+}
+
+// --- what the keys do --------------------------------------------------------
+
+/** Plays the Short `by` along the queue from the start; 0 plays this one again. */
+async function skip($: EngineInterface, by: number) {
+  await setShorts($, s => ({ ...s, cur: Math.min(s.queue.length, Math.max(0, s.cur + by)), pos: 0 }))
+  void play($)
+}
+
+async function togglePause($: EngineInterface) {
+  const s = await read($, shorts)
+  if (s.status === 'paused') return void play($, s.pos)
+  await pause($)
+}
+
+async function pause($: EngineInterface) {
+  const p = player
+  if (p === undefined) return
+  epoch++
+  stopPlayer()
+  await setShorts($, s => ({ ...s, status: 'paused', pos: p.pos }))
+}
+
+/**
+ * Likes the Short on screen, or takes the like back: the pane shows it at
+ * once, and YouTube hears of it one call at a time (each about 6 s).
+ */
+async function toggleLike($: EngineInterface) {
+  // Flipped inside the write: two presses landing together flip it twice.
+  const s = await setShorts($, s => {
+    const id = s.queue[s.cur]
+    return id === undefined ? s : { ...s, liked: withLike(s.liked, id, !hasLike(s, id)) }
+  })
+  const id = s.queue[s.cur]
+  if (id === undefined) return
+  const isLiked = hasLike(s, id)
+  likeChain = likeChain
+    .then(async () => {
+      // Pressed again since: that press sends its own.
+      if (hasLike(await read($, shorts), id) !== isLiked) return
+      if ((await helper($, 'yt.py', [isLiked ? 'like' : 'unlike', id], undefined, 60_000)) !== undefined) return
+      await setShorts($, s => (hasLike(s, id) === isLiked ? { ...s, liked: withLike(s.liked, id, !isLiked) } : s))
+      $.ui.toast(`cc-shorts: ${isLiked ? 'like' : 'unlike'} failed`)
+    })
+    .catch(err => log($, `like ${id}: ${String(err)}`))
+}
+
+const hasLike = (s: Shorts, id: string) => (s.liked ?? []).includes(id)
+
+function withLike(liked: string[] | undefined, id: string, isLiked: boolean): string[] {
+  const others = (liked ?? []).filter(i => i !== id)
+  return isLiked ? [...others, id] : others
+}
+
+async function toggleMute($: EngineInterface) {
+  const s = await setShorts($, s => ({ ...s, muted: !s.muted }))
+  if (player !== undefined) void play($, player.pos)
+  $.ui.toast(s.muted ? 'cc-shorts: muted' : 'cc-shorts: unmuted')
+}
+
+/** Pauses here first, so the browser's copy is not heard over this one. */
+async function openInBrowser($: EngineInterface, id: string) {
+  await pause($)
+  await $.process.run(['open', `https://www.youtube.com/shorts/${id}`])
+}
+
+/** Stops everything and deletes this session's downloads and frames. */
+async function shutDown($: EngineInterface) {
+  epoch++
+  stopPlayer()
+  // What has not started never does: the folder it would land in goes below.
+  dropWaiting(() => false)
+  downloads.clear()
+  layout = undefined
+  await setShorts($, s => ({
+    ...s,
+    status: 'idle',
+    frame: undefined,
+    shorts: Object.fromEntries(Object.entries(s.shorts).map(([id, short]) => [id, { ...short, path: undefined }])),
+  }))
+  // No draw sees the keyboard go: an idle pane holds none, a closed one draws no more.
+  await holdKeys($, false)
+  if (dir !== '') await $.process.run(['rm', '-rf', dir])
 }

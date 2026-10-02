@@ -136,7 +136,7 @@ def feed():
 
 
 class Api:
-    """InnerTube as the logged-in web page calls it: Chrome's cookies, the home page's config."""
+    """InnerTube as the logged-in web page calls it: the browser's cookies, the home page's config."""
 
     def __init__(self):
         self.ie = ydl().get_info_extractor('YoutubeTab')
