@@ -1,4 +1,4 @@
-"""cc-shorts YouTube helper: the Shorts feed, downloads and watch history.
+"""cc-shorts YouTube helper: the Shorts feed, downloads, watch history and likes.
 
     yt.py feed       stdin {"token": str | null, "seen": [videoId], "want": int}
                      prints {"ids": [videoId], "token": str | null,
@@ -9,6 +9,8 @@
                      {"id", "title", "author", "duration", "width", "height",
                       "hasAudio", "path"}
     yt.py watched ID marks the Short watched in the account's history
+    yt.py like ID    likes the Short as the logged-in account
+    yt.py unlike ID  takes the account's like (or dislike) off the Short
 
 Every command prints one JSON line on stdout; errors go to stderr with a
 non-zero exit.
@@ -68,7 +70,7 @@ def short_url(video_id):
 
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
-    out = {'feed': feed, 'download': download, 'watched': watched}[cmd](*args)
+    out = {'feed': feed, 'download': download, 'watched': watched, 'like': like, 'unlike': unlike}[cmd](*args)
     json.dump(out, sys.stdout)
     print()
 
@@ -96,15 +98,32 @@ def feed():
     return {'ids': f.ids, 'token': token, 'source': source, 'loggedIn': f.logged_in}
 
 
-class Feed:
-    def __init__(self, seen, want):
-        self.seen = seen
-        self.want = want
-        self.ids = []
+class Api:
+    """InnerTube as the logged-in web page calls it: Chrome's cookies, the home page's config."""
+
+    def __init__(self):
         self.ie = ydl().get_info_extractor('YoutubeTab')
         self.page = self.ie._download_webpage(HOME, 'home', note=False)
         self.ytcfg = self.ie.extract_ytcfg('home', self.page)
         self.logged_in = bool(self.ytcfg.get('LOGGED_IN'))
+
+    def call(self, endpoint, body):
+        return self.ie._call_api(
+            endpoint,
+            body,
+            endpoint,
+            note=False,
+            context=self.ytcfg.get('INNERTUBE_CONTEXT'),
+            headers=self.ie.generate_api_headers(ytcfg=self.ytcfg),
+        )
+
+
+class Feed(Api):
+    def __init__(self, seen, want):
+        super().__init__()
+        self.seen = seen
+        self.want = want
+        self.ids = []
 
     def scroll(self, token):
         """Pull sequence batches from `token`; returns the token after the last."""
@@ -148,16 +167,6 @@ class Feed:
         # already fetched the home page.
         info = ydl(extract_flat=True, playlist_items='1:30').extract_info(SUBSCRIPTIONS, download=False)
         self.add(e['id'] for e in info.get('entries') or [] if isinstance(e, dict) and e.get('id'))
-
-    def call(self, endpoint, body):
-        return self.ie._call_api(
-            endpoint,
-            body,
-            'feed',
-            note=False,
-            context=self.ytcfg.get('INNERTUBE_CONTEXT'),
-            headers=self.ie.generate_api_headers(ytcfg=self.ytcfg),
-        )
 
     def add(self, ids):
         for i in ids:
@@ -216,6 +225,24 @@ def download(video_id, folder):
 
 def watched(video_id):
     ydl(mark_watched=True, simulate=True, skip_download=True).extract_info(short_url(video_id), download=False)
+    return {'id': video_id}
+
+
+def like(video_id):
+    return rate(video_id, 'like/like')
+
+
+def unlike(video_id):
+    return rate(video_id, 'like/removelike')
+
+
+def rate(video_id, endpoint):
+    # The like button's own endpoint also carries `likeParams`, but the
+    # video id alone is enough, and only reel_item_watch hands those out.
+    api = Api()
+    if not api.logged_in:
+        sys.exit(f'{endpoint}: logged out, nothing to like with')
+    api.call(endpoint, {'target': {'videoId': video_id}})
     return {'id': video_id}
 
 

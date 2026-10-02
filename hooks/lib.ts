@@ -3,8 +3,8 @@
 
 import type { Frame, Mode } from '../types'
 
-/** Rows under the picture: author, title (two), status line, buttons. */
-export const CHROME_ROWS = 5
+/** Rows under the picture: author, title (two), status line, buttons (two). */
+export const CHROME_ROWS = 6
 
 export type Box = { columns: number; rows: number }
 

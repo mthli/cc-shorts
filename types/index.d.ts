@@ -40,6 +40,11 @@ export type Shorts = {
   /** Seconds into the current Short. */
   pos: number
   muted: boolean
+  /**
+   * Ids liked from the pane this session, as last pressed: YouTube may still
+   * be catching up. A Short not here counts as not liked.
+   */
+  liked?: string[]
   /** Undecided until the first frame: `image` is tried first. */
   mode?: Mode
   frame?: Frame

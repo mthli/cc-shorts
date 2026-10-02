@@ -12,7 +12,8 @@ A Claude Code mod that plays the **YouTube Shorts feed** in a pane beside the te
 |---|---|
 | Content source | The user's own YouTube Shorts feed (signed in through Chrome cookies) |
 | When a Short ends | **Play the next one automatically** |
-| Like / not interested | **Not in v1** |
+| Like | **`l` likes or unlikes the Short on screen** (added after v1) |
+| Not interested / dislike | Not done |
 | How it opens | **Only by hand with `/shorts`**; it does not open on its own at session start |
 | Terminal | Mainly Ghostty (real pixels); **iTerm2 must work too** (character-block fallback) |
 | Sound | Yes |
@@ -74,6 +75,13 @@ Capabilities and limits that matter to this project:
 - The other entries have only a `videoId`, and no title in their `overlay`.
 - **Title, author and duration all come from yt-dlp's metadata at download time**, since the download parses that information anyway. The public oEmbed (`https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/shorts/<id>`) also works when tested, and needs no cookies.
 
+**Likes** (tested 2026-10-02 on the user's account, liking one Short and taking the like back):
+
+- `reel/reel_item_watch` carries the Short's like button: `likeButtonViewModel.likeStatusEntity.likeStatus` (`INDIFFERENT`, `LIKE`, `DISLIKE`), and `likeEndpoint`s with `likeParams` (to like) and `removeLikeParams` (to take it back).
+- **`POST like/like` and `POST like/removelike` with only `{ target: { videoId } }` work**: no `likeParams` needed. Signed the same way as the feed (`Api` in `helper/yt.py`). `reel_item_watch` read `LIKE` right after the like and `INDIFFERENT` right after the removal.
+- A call takes about 6–7 seconds (reading cookies and the home page, like `feed`). `removelike` on a Short not liked succeeds and changes nothing; an unknown video id answers HTTP 404.
+- The pane does not ask a Short's status first: the feed hands out Shorts not seen before, so it counts every Short as not liked until liked from the pane. That saves a signed-in request per Short.
+
 ## Research finding 3: downloading and decoding (tested)
 
 - **Download without cookies first**: without cookies a Short takes about 4–5 seconds; with cookies about 14 seconds, about 4 of them reading cookies, plus yt-dlp requests more client APIs (web creator, tv, and so on) when signed in. So download without cookies first, and retry with cookies only on failure (age restrictions, bot checks, and the like).
@@ -89,7 +97,7 @@ Capabilities and limits that matter to this project:
 
 ```
 /shorts ──► Pane (focus, asks for 50 columns × 40 rows)
-              │  ui.render: Image (Ghostty) or Raster (iTerm2) + author / title / progress + five buttons
+              │  ui.render: Image (Ghostty) or Raster (iTerm2) + author / title / progress + six buttons
               ▼
   helper/yt.py feed ──► queue of video IDs ──► helper/yt.py download (preloads the next 2) ──► ffmpeg -re
      ▲  token and watched IDs kept in $.store                         │ picture: frame-N.rgb (atomic overwrite)
@@ -99,10 +107,11 @@ Capabilities and limits that matter to this project:
 
 What each file does:
 
-- `helper/yt.py`: Python with three subcommands, each printing one JSON line on stdout. The mod calls it through `$.process.run([pipx's python, '-B', yt.py, …])` (`-B` keeps `__pycache__` out of the repo).
+- `helper/yt.py`: Python with five subcommands, each printing one JSON line on stdout. The mod calls it through `$.process.run([pipx's python, '-B', yt.py, …])` (`-B` keeps `__pycache__` out of the repo).
   - `feed`: stdin takes `{ token, seen, want }`, returns `{ ids, token, source, loggedIn }`. It continues from the token first; if the token is dead it starts over from the home page; if neither gives anything it falls back to the subscriptions Shorts (and returns a null token). At most 3 batches per call.
   - `download ID DIR`: returns `{ id, title, author, duration, width, height, hasAudio, path }`.
   - `watched ID`: writes this Short to the account's watch history with yt-dlp's `mark_watched`.
+  - `like ID` / `unlike ID`: likes the Short as the signed-in account, or takes the like back; exits non-zero when signed out. `feed` and these share `Api`: Chrome's cookies, the home page's `ytcfg`, and InnerTube calls signed with them.
 - `hooks/lib.ts`: pure functions with no `$`, fully covered by tests: picture size, ffmpeg arguments, progress parsing, frames to character blocks, time formatting.
 - `hooks/register.tsx`: the pane, queue and preloading, playback, the blit loop, the fallback, keys, cleanup.
 - `types/index.d.ts`: the type of `cc-shorts.shorts` in `$.state` (queue, current position, each Short's metadata, playback status, mode, frame details, whether signed in).
@@ -118,13 +127,14 @@ How it works:
    - **Pause**: stop ffmpeg and note the position; **resume**: start it again with `-ss <position>`. **Mute** and **a pane size change** also restart ffmpeg at the current position. A video with no audio track outputs no sound at all.
    - **Next Short when one ends**: on `progress=end` with ffmpeg exiting 0, move on to the next; anything else shows an error, and `j` skips.
 4. **Display**:
-   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 5 rows left below for author, a two-row title, progress and buttons (`videoBox`).
+   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 6 rows left below for author, a two-row title, progress and two rows of three buttons (`videoBox`; six buttons in one row outgrow the 50 columns `/shorts` asks for).
    - It first draws with `Image` and `{ file, format: 'rgb', width, height, generation }`; the frame is about columns × 10 pixels wide, at most 480 (`frameSize`).
    - When `blit` is refused with "draws its alt", record `mode: 'raster'` in `$.state` (Image is not tried again this session) and restart ffmpeg at the current position. In Raster mode ffmpeg outputs small 32-color frames of `columns × (rows × 2)`; the mod reads them with `$.fs.read`, turns them into `▀` blocks, and blits those.
    - A redraw reuses the source or cells of the last successful blit, so the picture does not flash blank.
-5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `m` mute, `x` close. Below the video are the author (a Button: a click in the fullscreen terminal, or Tab then Enter, pauses here and opens the Short in the browser with `open`), the title (two rows), and a status line like "▶ 0:12 / 0:28 · muted"; when the last `feed` call was signed out it says "signed out: not your feed".
-6. **Reporting watch history**: when a Short has played to `min(10 seconds, half its length)`, call `yt.py watched` once, at most once per Short (tracked in a module variable, so a hot reload may report one again, which is harmless). Preloading reports nothing.
-7. **Cleanup**:
+5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `l` like / unlike, `m` mute, `x` close. Below the video are the author (a Button: a click in the fullscreen terminal, or Tab then Enter, pauses here and opens the Short in the browser with `open`), the title (two rows), and a status line like "▶ 0:12 / 0:28 · Liked · Muted"; when the last `feed` call was signed out it says "Signed out: not your feed".
+6. **Likes**: `l` flips the Short's id in `liked` in `$.state` (so a like lasts the session, through a `/clear` too), which the pane shows at once as "Unlike" and "Liked". The flip is read and written inside one `update`, so two presses landing in the same instant (it happens: tmux delivered `l l` as two presses in one millisecond) flip it twice instead of liking twice. The calls to `yt.py like` / `unlike` then go one at a time in a promise chain; when its turn comes, a call whose choice a later press has already overturned is skipped, so pressing `l` several times ends with YouTube on the last choice. A failed call puts the old state back (unless pressed again since) and toasts "like failed".
+7. **Reporting watch history**: when a Short has played to `min(10 seconds, half its length)`, call `yt.py watched` once, at most once per Short (tracked in a module variable, so a hot reload may report one again, which is harmless). Preloading reports nothing.
+8. **Cleanup**:
    - `x`: clean up first, then close the pane (a `$.ui.close` the plugin calls itself does not fire its own `ui.close` hook).
    - A close by the user: the `ui.close` hook cleans up.
    - Cleaning up means: stop ffmpeg and the timers, set the status back to idle, and delete the whole session temp directory. The queue, current position and mute setting stay, so the next `/shorts` carries on with the current Short from where it was closed.
@@ -137,7 +147,8 @@ How it works:
 
 Verified (2026-10-02):
 
-- 16 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
+- 18 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
+- **Likes against the real account**: `yt.py like` and `yt.py unlike` on one Short, checked with `reel_item_watch` before and after each (see "Likes" under research finding 2). `tests/pane.test.tsx` covers the button, the status line, the call and putting the state back after a failed call; `l` has not yet been pressed in a running pane.
 - **End to end**: ran the whole flow in a Claude Code with `--plugin-dir` inside tmux. tmux does not support image protocols, which happens to cover "Image refused → fall back to Raster": the picture was real color frames, the progress moved, and the next Short played when one ended. `j`/`k`/`p`/`m`/`x` were all pressed; resuming after a pause picked up at the right position; during playback there was always exactly 1 frame file and 3–4 mp4s; `watched` was called after 10 seconds of watching; after `x` and after a hot reload, ffmpeg was confirmed killed and the temp directory deleted. The screen was read with `tmux capture-pane -p` (add `-e` to see colors), and the plugin log with `--debug-file`.
 - **`/clear` mid-Short** (in tmux): the same ffmpeg played on and the progress kept moving through the `/clear`; when the Short ended the next one in the queue started on its own; after `/exit`, ffmpeg was gone and the temp directory deleted. `tests/pane.test.tsx` covers the copy and its one-time restore.
 - After trying it, the user said it "works well", but which terminal it was tried in and what exactly was checked were not recorded item by item.
@@ -160,7 +171,7 @@ Status of the original "verify first while implementing" points:
 
 ## Risks
 
-- `reel/reel_watch_sequence` is an **unofficial API** and breaks the moment YouTube changes it. Automated requests with a signed-in session violate YouTube's Terms of Service and carry some risk to the account. The request rate should stay close to a person scrolling normally (about 15 Shorts per batch, fetching the next batch only when nearly out, at most 3 batches per call).
+- `reel/reel_watch_sequence` is an **unofficial API** and breaks the moment YouTube changes it. Automated requests with a signed-in session violate YouTube's Terms of Service and carry some risk to the account; likes are writes to the account, made only when the person presses `l`. The request rate should stay close to a person scrolling normally (about 15 Shorts per batch, fetching the next batch only when nearly out, at most 3 batches per call).
 - `helper/yt.py` wraps yt-dlp's **private function** `yt_dlp.cookies._find_files` and uses internal methods like `_call_api` and `_download_webpage`; upgrading yt-dlp may mean changes here.
 - The mod API is in EARLY ACCESS; upgrading Claude Code may mean changes here.
 - Reading Chrome cookies may pop up a macOS Keychain authorization prompt.

@@ -67,6 +67,7 @@ let lastSource: ImageSource | undefined
 let lastCells: string | undefined
 let refilling: Promise<void> | undefined
 let downloadChain: Promise<unknown> = Promise.resolve()
+let likeChain: Promise<unknown> = Promise.resolve()
 /** Downloads failed in a row: past a few, the network is down, not the video. */
 let failures = 0
 const downloads = new Map<string, Promise<Short | undefined>>()
@@ -164,9 +165,15 @@ export const register: Register = on => {
       )
     }
 
+    const isLiked = short !== undefined && hasLike(s, short.id)
     const where = `${clockTime(s.pos)} / ${clockTime(short?.duration ?? 0)}`
     const state = s.status === 'paused' ? `⏸ ${where}` : s.status === 'playing' ? `▶ ${where}` : ''
-    const notes = [state, s.muted ? 'muted' : '', s.isLoggedIn ? '' : 'signed out: not your feed']
+    const notes = [
+      state,
+      isLiked ? 'Liked' : '',
+      s.muted ? 'Muted' : '',
+      s.isLoggedIn ? '' : 'Signed out: not your feed',
+    ]
       .filter(Boolean)
       .join(' · ')
 
@@ -192,8 +199,10 @@ export const register: Register = on => {
         <Text dimColor wrap="truncate">
           {notes || ' '}
         </Text>
+        {/* Two rows of three: six in one row outgrow the 50 columns asked for. */}
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
           <Button key="previous" plain hotkey="k" label="Prev" onPress={() => void skip($, -1)} />
+          <Button key="next" plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
           <Button
             key="pause"
             plain
@@ -201,7 +210,9 @@ export const register: Register = on => {
             label={s.status === 'paused' ? 'Play' : 'Pause'}
             onPress={() => void togglePause($)}
           />
-          <Button key="next" plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
+        </Box>
+        <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
+          <Button key="like" plain hotkey="l" label={isLiked ? 'Unlike' : 'Like'} onPress={() => void toggleLike($)} />
           <Button key="mute" plain hotkey="m" label={s.muted ? 'Unmute' : 'Mute'} onPress={() => void toggleMute($)} />
           <Button
             key="close"
@@ -524,6 +535,37 @@ async function toggleMute($: EngineInterface) {
   const s = await setShorts($, s => ({ ...s, muted: !s.muted }))
   if (player !== undefined) void play($, player.pos)
   $.ui.toast(s.muted ? 'cc-shorts: muted' : 'cc-shorts: unmuted')
+}
+
+/**
+ * Likes the Short on screen, or takes the like back: the pane shows it at
+ * once, and YouTube hears of it one call at a time (each about 6 s).
+ */
+async function toggleLike($: EngineInterface) {
+  // Flipped inside the write: two presses landing together flip it twice.
+  const s = await setShorts($, s => {
+    const id = s.queue[s.cur]
+    return id === undefined ? s : { ...s, liked: withLike(s.liked, id, !hasLike(s, id)) }
+  })
+  const id = s.queue[s.cur]
+  if (id === undefined) return
+  const isLiked = hasLike(s, id)
+  likeChain = likeChain
+    .then(async () => {
+      // Pressed again since: that press sends its own.
+      if (hasLike(await read($, shorts), id) !== isLiked) return
+      if ((await helper($, [isLiked ? 'like' : 'unlike', id], undefined, 60_000)) !== undefined) return
+      await setShorts($, s => (hasLike(s, id) === isLiked ? { ...s, liked: withLike(s.liked, id, !isLiked) } : s))
+      $.ui.toast(`cc-shorts: ${isLiked ? 'like' : 'unlike'} failed`)
+    })
+    .catch(err => log($, `like ${id}: ${String(err)}`))
+}
+
+const hasLike = (s: Shorts, id: string) => (s.liked ?? []).includes(id)
+
+function withLike(liked: string[] | undefined, id: string, isLiked: boolean): string[] {
+  const others = (liked ?? []).filter(i => i !== id)
+  return isLiked ? [...others, id] : others
 }
 
 /** Stops everything and deletes this session's downloads and frames. */

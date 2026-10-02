@@ -15,10 +15,10 @@ const PANE = {
 
 const EMPTY = { queue: [], cur: 0, shorts: {}, status: 'idle', message: '', pos: 0, muted: false, isLoggedIn: true }
 
-test('before anything plays: the hint, and the five keys', async $ => {
+test('before anything plays: the hint, and the six keys', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: 'Run /shorts to start' })).toBeDefined()
-  for (const label of ['Prev', 'Pause', 'Next', 'Mute', 'Close']) {
+  for (const label of ['Prev', 'Next', 'Pause', 'Like', 'Mute', 'Close']) {
     expect(await ui.find({ type: 'Button', text: label })).toBeDefined()
   }
   await ui.unmount()
@@ -38,6 +38,62 @@ test('the author opens the Short in the browser', async ($, on) => {
   expect(await ui.find({ type: 'Button', text: 'Someone ↗' })).toBeDefined()
   await ui.press({ key: 'author' })
   expect(argvs).toContainEqual(['open', 'https://www.youtube.com/shorts/abc123'])
+  await ui.unmount()
+})
+
+test('likes: shown at once, put back when refused, every press counted', async ($, on) => {
+  const argvs: (readonly string[])[] = []
+  let exitCode = 0
+  on('process.run', (_, e) => {
+    argvs.push(e.argv)
+    const stdout = exitCode === 0 ? '{"id": "abc123"}' : ''
+    return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const short = { id: 'abc123', title: 'A title', author: 'Someone', duration: 30, hasAudio: true }
+  // The plugin's only state value, held here so its writes come back.
+  let value: unknown = { ...EMPTY, queue: [short.id], shorts: { [short.id]: short } }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  // What `session.start` asks of the session, for the helper's path.
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const yt = (cmd: string) => argvs.filter(argv => argv.includes(cmd) && argv.includes(short.id))
+  // The state above redraws nothing when written: each press draws anew.
+  const press = async (key: string, times = 1) => {
+    const pressed = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+    await Promise.all(Array.from({ length: times }, () => pressed.press({ key })))
+    await pressed.unmount()
+    return $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+  }
+
+  let ui = await press('like')
+  expect(await ui.find({ type: 'Button', text: 'Unlike' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\bLiked\b/ })).toBeDefined()
+  expect(yt('like')).toHaveLength(1)
+  await ui.unmount()
+
+  exitCode = 1
+  ui = await press('like')
+  expect(yt('unlike')).toHaveLength(1)
+  // The unlike failed: the like stands, as it does on YouTube.
+  expect(await ui.find({ type: 'Button', text: 'Unlike' })).toBeDefined()
+  await ui.unmount()
+
+  // Two presses landing together: unliked, then liked again, and YouTube
+  // told the last of them.
+  exitCode = 0
+  ui = await press('like', 2)
+  expect(await ui.find({ type: 'Button', text: 'Unlike' })).toBeDefined()
+  expect(argvs.at(-1)?.at(-2)).toBe('like')
   await ui.unmount()
 })
 
