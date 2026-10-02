@@ -6,7 +6,7 @@
 > Maintained: 2026-10-03 (targeted verification: `ydl` reports a refused Keychain as a cookie
 > failure, and `MAX_BATCHES` is shared by every scroll of one `feed` call. Checked by an offline
 > script that stubs yt-dlp's cookie reader. The research probe is gone from the tree; its findings
-> stay in `docs/research.md`.)
+> stay in `docs/research.md`. Later the same day: the Keychain and Safari hints were shortened.)
 
 ## Responsibilities
 
@@ -68,7 +68,8 @@ Failure contract:
   - `cannot read <browser>'s cookies: <cause>`, for any cookie-load failure.
     - For Safari with a `PermissionError`, the cause is replaced by a Full Disk Access hint.
     - For a Chromium browser whose key the Keychain refused, the cause is
-      `the macOS Keychain did not hand over the browser's key: answer its prompt with Allow, …`.
+      `allow the macOS Keychain prompt for its key`.
+    - Neither hint names `/shorts browser`: the player's feed error already offers it.
     - `cookie_failure` reads a `CookieLoadError`'s `__cause__` before its `__context__`. So that
       hint survives being raised inside `download`'s retry.
   - `signed out: no YouTube login in <browser>'s cookies`: `feed` found no ids and the page is signed

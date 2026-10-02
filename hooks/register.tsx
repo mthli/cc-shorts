@@ -232,7 +232,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     if (e.surface !== 'terminal') {
       const { Text } = $.ui.resolve(e)
-      return <Text dimColor>cc-shorts plays only in the terminal.</Text>
+      return <Text dimColor>Run Claude Code in a terminal to play Shorts.</Text>
     }
     const { Box, Text, Button, Image, Raster } = $.ui.resolve(e)
     const s = await read($, shorts)
@@ -375,7 +375,7 @@ function checkSetup($: EngineInterface): Promise<Missing[]> {
       missing.push({ name: 'ffmpeg', why: 'this ffmpeg has no audiotoolbox output for the sound', formula: 'ffmpeg' })
     }
     if (!hasDeno) {
-      const why = "not found; yt-dlp solves YouTube's JS challenges with it, and may miss formats without"
+      const why = "not found; yt-dlp solves YouTube's JS challenges with it and may miss formats without it"
       missing.push({ name: 'deno', why, formula: 'deno', isOptional: true })
     }
     isSetUp = !missing.some(m => !m.isOptional)
@@ -439,7 +439,9 @@ async function chooseBrowser($: EngineInterface): Promise<boolean> {
   if (answer === '') return false
   const chosen = findBrowser(answer)
   if (chosen === undefined) {
-    $.ui.toast(`cc-shorts: yt-dlp reads ${nameList(BROWSERS.map(b => b.name))}; not ${answer}`, { timeoutMs: 10_000 })
+    $.ui.toast(`cc-shorts: yt-dlp cannot read ${answer}; it reads ${nameList(BROWSERS.map(b => b.name))}`, {
+      timeoutMs: 10_000,
+    })
     return false
   }
   // Where the feed had scrolled to belongs to the account it scrolled with.
@@ -463,7 +465,7 @@ async function play($: EngineInterface, from = 0) {
     s = await read($, shorts)
     if (s.queue.length <= s.cur) {
       const why = error === undefined ? '' : ` (${error})`
-      const message = `Could not get the feed${why}. j retries; /shorts browser switches browser`
+      const message = `Could not get the feed${why}. Press j to retry, or switch browsers with /shorts browser`
       await setShortsAt($, my, s => ({ ...s, status: 'error', message }))
       return
     }
@@ -485,7 +487,7 @@ async function play($: EngineInterface, from = 0) {
       await setShortsAt($, my, s => ({
         ...s,
         status: 'error',
-        message: 'Downloads keep failing; check the network, then press j to retry',
+        message: 'Downloads keep failing. Check the network, then press j to retry',
       }))
       return
     }
@@ -618,11 +620,12 @@ async function follow($: EngineInterface, p: Player, short: Short) {
     return
   }
   log($, `ffmpeg ended ${JSON.stringify(ended)}: ${p.stderr}`)
+  const why = lastLine(p.stderr)
   await setShorts($, s => ({
     ...s,
     status: 'error',
     pos: p.pos,
-    message: `Playback failed: ${lastLine(p.stderr) || 'unknown reason'} (j for next)`,
+    message: `Playback failed${why === '' ? '' : ` (${why})`}. Press j for the next Short`,
   }))
 }
 

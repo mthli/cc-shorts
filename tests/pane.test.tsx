@@ -180,7 +180,7 @@ test('everything there: /shorts asks for the browser once, and the helpers read 
 
 test('off the terminal it says so instead of drawing a player', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'desktop', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /only in the terminal/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /in a terminal to play/ })).toBeDefined()
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
   await ui.unmount()
 })

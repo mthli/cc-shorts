@@ -48,13 +48,13 @@ describe('setup', () => {
 
   test('setupToast: nothing missing says nothing; deno alone gets its command', async () => {
     expect(setupToast([])).toBeUndefined()
-    expect(setupToast([deno])).toBe('cc-shorts: deno is missing, so yt-dlp may miss formats; brew install deno')
+    expect(setupToast([deno])).toBe('cc-shorts: deno is missing, so yt-dlp may miss formats; run brew install deno')
     expect(setupToast([ffmpeg])).toBe('cc-shorts: ffmpeg is missing; /shorts offers to install it')
   })
 
   test('installQuestion: the command, or Homebrew first', async () => {
     expect(installQuestion([ffmpeg, deno], true)).toBe(
-      'cc-shorts is missing ffmpeg (and deno, which helps). Install with `brew install ffmpeg deno`?',
+      'cc-shorts is missing ffmpeg, plus deno, which helps yt-dlp find formats. Install with `brew install ffmpeg deno`?',
     )
     expect(installQuestion([ytdlp, ffmpeg], false)).toContain('Homebrew')
   })
@@ -92,14 +92,14 @@ describe('the browser', () => {
   })
 
   test('browserQuestion: names the browsers here that the choices leave out', async () => {
-    expect(browserQuestion(named('chrome', 'safari'), '')).not.toContain('here too')
-    expect(browserQuestion(named('chrome', 'safari'), '')).toContain("Safari's need Full Disk Access")
+    expect(browserQuestion(named('chrome', 'safari'), '')).not.toContain('on this Mac too')
+    expect(browserQuestion(named('chrome', 'safari'), '')).toContain('giving your terminal Full Disk Access')
     expect(browserQuestion(named('chrome', 'edge'), '')).not.toContain('Full Disk Access')
     expect(browserQuestion(named('chrome', 'safari', 'edge', 'firefox', 'brave'), '')).toContain(
-      'Brave is here too: type it.',
+      'Brave is on this Mac too: type it in.',
     )
     expect(browserQuestion(named('chrome', 'safari', 'edge', 'firefox', 'brave', 'opera'), '')).toContain(
-      'Brave and Opera are here too: type one.',
+      'Brave and Opera are on this Mac too: type one in.',
     )
   })
 })

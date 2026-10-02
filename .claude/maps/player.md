@@ -6,7 +6,8 @@
 > Maintained: 2026-10-03 (targeted verification: the confirmed bugs are fixed and covered by pane
 > tests. `start` and `play` write only while their epoch is current. `pause` holds back a Short still
 > on its way. `session.start` gives the input source back after the setup check. `dir` lives in
-> `shorts` once a `/clear` has passed. The host findings it cites now live in `docs/research.md`.)
+> `shorts` once a `/clear` has passed. The host findings it cites now live in `docs/research.md`.
+> Later the same day: the feed error, playback error and off-terminal texts were reworded.)
 
 ## Responsibilities
 
@@ -188,8 +189,8 @@ The first load and every hot reload run this. A `/clear` does not.
      compare-and-set retry.
    - It checks `epoch` again before it recurses after a failed download.
 2. If the queue is used up, it sets `loading` ("Fetching the feed…") and awaits `refill`. If the queue
-   is still used up, it sets `error`: "Could not get the feed (…). j retries; /shorts browser switches
-   browser".
+   is still used up, it sets `error`: "Could not get the feed (…). Press j to retry, or switch
+   browsers with /shorts browser".
 3. If the current Short has no file, it sets `loading` ("Downloading…").
 4. It drops waiting downloads outside the current Short and the 5 after it, then awaits the urgent
    download of the current one.
@@ -276,8 +277,8 @@ The first load and every hot reload run this. A `/clear` does not.
   redraws about once a second.
 - It sends the watched report at its threshold.
 - **Clean end** (`progress=end` and exit 0): it moves to the next Short.
-- **Otherwise:** it sets `error` with "Playback failed: <last stderr line> (j for next)" and keeps
-  `pos`.
+- **Otherwise:** it sets `error` with "Playback failed (<last stderr line>). Press j for the next
+  Short", leaving out the parentheses when stderr is empty, and keeps `pos`.
 - It returns early once `player` is no longer this player. It never awaits the `result` of a stream
   it stopped.
 
@@ -285,8 +286,8 @@ The first load and every hot reload run this. A `/clear` does not.
 
 ### 7. Rendering (`ui.render`)
 
-- **Off the terminal:** it draws only "cc-shorts plays only in the terminal.". There are no keys, no
-  `holdKeys`, and no `layout`.
+- **Off the terminal:** it draws only "Run Claude Code in a terminal to play Shorts.". There are no
+  keys, no `holdKeys`, and no `layout`.
 - **On the terminal:**
   - It calls `holdKeys(isFocused && status !== 'idle')` without awaiting it.
   - It sets `layout = videoBox(bodyColumns, bodyRows)`. That is the widest 9:8 box that leaves

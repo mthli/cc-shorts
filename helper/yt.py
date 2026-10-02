@@ -90,8 +90,7 @@ def ydl(cookies=True, **params):
         _ = y.cookiejar
         if any('find-generic-password' in w for w in y.warnings):
             raise yt_dlp.cookies.CookieLoadError('failed to load cookies') from PermissionError(
-                "the macOS Keychain did not hand over the browser's key: answer its prompt with Allow, "
-                'or pick another browser with /shorts browser'
+                'allow the macOS Keychain prompt for its key'
             )
     return y
 
@@ -112,10 +111,7 @@ def main():
         # reads (Files & Folders does not reach them); the other browsers'
         # folders need no grant at all.
         if BROWSER == 'safari' and isinstance(cause, PermissionError):
-            cause = (
-                'give the terminal Full Disk Access in System Settings > Privacy & Security, '
-                'or pick a browser that needs none with /shorts browser'
-            )
+            cause = 'give the terminal Full Disk Access in System Settings > Privacy & Security'
         sys.exit(f"cannot read {BROWSER}'s cookies: {cause}")
     json.dump(out, sys.stdout)
     print()

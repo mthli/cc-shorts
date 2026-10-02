@@ -46,14 +46,14 @@ export function setupToast(missing: Missing[]): string | undefined {
   if (missing.length === 0) return undefined
   const lacks = `cc-shorts: ${nameList(missing.map(m => m.name))} ${missing.length > 1 ? 'are' : 'is'} missing`
   // Only deno is optional: yt-dlp solves YouTube's JS challenges with it.
-  if (isNeeded(missing).length === 0) return `${lacks}, so yt-dlp may miss formats; ${brewCommand(missing)}`
+  if (isNeeded(missing).length === 0) return `${lacks}, so yt-dlp may miss formats; run ${brewCommand(missing)}`
   return `${lacks}; /shorts offers to install ${missing.length > 1 ? 'them' : 'it'}`
 }
 
 /** What `/shorts` asks while something it needs is missing. */
 export function installQuestion(missing: Missing[], hasBrew: boolean): string {
   const optional = missing.filter(m => m.isOptional).map(m => m.name)
-  const helps = optional.length > 0 ? ` (and ${nameList(optional)}, which helps)` : ''
+  const helps = optional.length > 0 ? `, plus ${nameList(optional)}, which helps yt-dlp find formats` : ''
   const lacks = `cc-shorts is missing ${nameList(isNeeded(missing).map(m => m.name))}${helps}.`
   if (!hasBrew) return `${lacks} Homebrew, which installs them, is missing too. Ask Claude to walk you through it?`
   return `${lacks} Install with \`${brewCommand(missing)}\`?`
@@ -70,13 +70,13 @@ export function installPrompt(missing: Missing[], hasBrew: boolean): string {
       ? `Run \`${command}\`. It can take several minutes: give it a long timeout.`
       : 'Homebrew is missing too. Do not install it yourself: its installer asks for my password, so tell me to ' +
         `run the one from https://brew.sh in my own terminal, then run \`${command}\` once it is in.`,
-    "cc-shorts runs these from Claude Code's PATH: if one is installed already, find out why it cannot see it.",
+    "cc-shorts runs these from Claude Code's PATH: if I have one already, find out why cc-shorts cannot see it.",
     // Homebrew 7 warns about every untrusted tap on an install, with the
     // `brew trust` and `brew untap` lines that would silence it.
-    'Each formula is in homebrew/core, which needs no tap trust. A warning that other taps are not trusted does ' +
-      'not stop the install and is not about it: leave it, and run no `brew trust` or `brew untap`.',
+    'Each formula is in homebrew/core, which needs no tap trust. Brew may warn that other taps are not trusted; ' +
+      'that warning does not block this install, so leave it and run no `brew trust` or `brew untap`.',
     'If brew needs sudo, a password or anything else from me, stop and tell me what it said.',
-    'When it is done, tell me to run /shorts again.',
+    'Once it is done, tell me to run /shorts again.',
   ].join('\n')
 }
 
@@ -126,8 +126,8 @@ export function browserQuestion(here: readonly Browser[], current: string): stri
   const offered = browserOptions(here, current)
   const others = here.filter(b => !offered.includes(b.name)).map(b => b.name)
   const [are, it] = others.length > 1 ? ['are', 'one'] : ['is', 'it']
-  const more = others.length > 0 ? ` ${nameList(others)} ${are} here too: type ${it}.` : ''
-  const safari = offered.includes('Safari') ? " Safari's need Full Disk Access for the terminal." : ''
+  const more = others.length > 0 ? ` ${nameList(others)} ${are} on this Mac too: type ${it} in.` : ''
+  const safari = offered.includes('Safari') ? ' Picking Safari means giving your terminal Full Disk Access.' : ''
   return `Which browser are you signed in to YouTube with? cc-shorts reads your feed through its cookies.${more}${safari}`
 }
 
