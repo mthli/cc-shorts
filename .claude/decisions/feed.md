@@ -1,7 +1,7 @@
 # Feed Decisions
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: feed"`
-> Last distilled: 2026-10-03 (HEAD = e3304ae)
+> Last distilled: 2026-10-03 (HEAD = bcb06b4)
 
 ## Active
 
@@ -31,11 +31,11 @@
 
 ### D4: The person's browser, and cookie failures in plain words
 
-- **What**: `CC_SHORTS_BROWSER` picks the cookie browser (Chrome when unset), `main()` walks the exception chain to yt-dlp's `CookieLoadError` and exits with "cannot read <browser>'s cookies: <cause>" (Safari's `PermissionError` pointing to Full Disk Access and `/shorts browser`), and `feed` exits "signed out" before trying subscriptions.
+- **What**: `CC_SHORTS_BROWSER` picks the cookie browser (Chrome when unset), `main()` walks the exception chain to yt-dlp's `CookieLoadError` and exits with "cannot read <browser>'s cookies: <cause>" (Safari's `PermissionError` pointing to Full Disk Access, worded as in D8), and `feed` exits "signed out" before trying subscriptions.
 - **Why**: yt.py read only Chrome, and cookie or login failures surfaced as raw tracebacks or 401s.
 - **Tradeoffs**: Messages use yt-dlp's browser ids rather than display names, and docstrings say "the browser's cookies" without naming the variable.
 - **Watch out**: The chain walk depends on yt-dlp raising a `DownloadError` while handling `CookieLoadError`, and the `Storage/` patch still assumes a Chromium profile layout.
-- **Source**: bed1bf0, 16deaa2
+- **Source**: bed1bf0, 16deaa2, bcb06b4
 
 ### D5: A source-verified feed map pinned to yt-dlp 2026.8.19
 
@@ -47,11 +47,11 @@
 
 ### D6: A Keychain refusal is reported, not read as signed out
 
-- **What**: `_YoutubeDL.report_warning` records every warning, `ydl()` loads cookies up front, and a failed `find-generic-password` raises `CookieLoadError` from a `PermissionError` whose hint says to answer with Allow or pick another browser, with `cookie_failure` reading `__cause__` before `__context__` so the hint survives `download`'s retry.
+- **What**: `_YoutubeDL.report_warning` records every warning, `ydl()` loads cookies up front, and a failed `find-generic-password` raises `CookieLoadError` from a `PermissionError` whose hint says to allow the Keychain prompt (worded as in D8), with `cookie_failure` reading `__cause__` before `__context__` so the hint survives `download`'s retry.
 - **Why**: A refused Keychain made yt-dlp silently drop the encrypted cookies, so the feed read as signed out and the pane wrongly suggested switching browsers.
 - **Tradeoffs**: Cookies load when the YoutubeDL is built rather than at the first request, and the hint says Allow rather than Always Allow, so the prompt returns each time.
 - **Watch out**: Detection matches yt-dlp's warning text, so a rewording silently brings back the false "signed out", it was checked only against a stubbed cookie reader, and `watched`, `like` and `unlike` now exit with the Keychain error.
-- **Source**: e3304ae
+- **Source**: e3304ae, bcb06b4
 
 ### D7: One batch budget per feed call
 
@@ -60,3 +60,15 @@
 - **Tradeoffs**: A token path that spends the budget on already-seen ids returns the home page's seeds and an unread token instead of a fresh batch.
 - **Watch out**: No risk of its own was recorded beyond D1's request-rate and account concerns.
 - **Source**: e3304ae
+
+### D8: Cookie hints name the fix and leave the browser switch to the player
+
+- **What**: A refused Keychain exits "cannot read <browser>'s cookies: allow the macOS Keychain prompt for its key", Safari's `PermissionError` names only the Full Disk Access step, and the player's feed error that wraps them offers `/shorts browser`.
+- **Why**: Both hints ended with `/shorts browser` and so did the player's feed error, so the pane said it twice.
+- **Tradeoffs**: The helper's own message no longer mentions switching browsers, which shows only in the debug log for downloads, watch reports and likes.
+- **Watch out**: A surface that shows the helper's error without the player's wrapper loses the switch hint, and `docs/research.md`'s verification log still quotes the older Keychain text.
+- **Source**: bcb06b4
+
+## Superseded
+
+- ~~Cookie hints ending with "or pick another browser with /shorts browser" (D4's Safari hint, D6's Keychain hint)~~ → replaced by **D8** in bcb06b4 (2026-10-03)
