@@ -207,8 +207,8 @@ export const register: Register = on => {
         </Text>
         {/* Two rows of three: six in one row outgrow the 50 columns asked for. */}
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button key="previous" plain hotkey="k" label="Prev" onPress={() => void skip($, -1)} />
           <Button key="next" plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
+          <Button key="previous" plain hotkey="k" label="Prev" onPress={() => void skip($, -1)} />
           <Button
             key="pause"
             plain
