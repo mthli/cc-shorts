@@ -13,12 +13,31 @@ const PANE = {
   },
 } as const
 
+const EMPTY = { queue: [], cur: 0, shorts: {}, status: 'idle', message: '', pos: 0, muted: false, isLoggedIn: true }
+
 test('before anything plays: the hint, and the five keys', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: 'Run /shorts to start' })).toBeDefined()
-  for (const label of ['Previous', 'Pause', 'Next', 'Mute', 'Close']) {
+  for (const label of ['Prev', 'Pause', 'Next', 'Mute', 'Close']) {
     expect(await ui.find({ type: 'Button', text: label })).toBeDefined()
   }
+  await ui.unmount()
+})
+
+test('the author opens the Short in the browser', async ($, on) => {
+  const argvs: (readonly string[])[] = []
+  on('process.run', (_, e) => {
+    argvs.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  // One Short queued and idle: the plugin's only state value, read from here.
+  const short = { id: 'abc123', title: 'A title', author: 'Someone', duration: 30, hasAudio: true }
+  const value = { ...EMPTY, queue: [short.id], shorts: { [short.id]: short } }
+  on('state.get', () => ({ value: { value, version: 1 } }))
+  const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Button', text: 'Someone ↗' })).toBeDefined()
+  await ui.press({ key: 'author' })
+  expect(argvs).toContainEqual(['open', 'https://www.youtube.com/shorts/abc123'])
   await ui.unmount()
 })
 

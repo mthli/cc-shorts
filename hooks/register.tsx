@@ -173,15 +173,27 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" alignItems="center">
         {picture}
-        <Text bold wrap="truncate">
-          {short?.author ?? ' '}
-        </Text>
-        <Text wrap="truncate">{short?.title ?? ' '}</Text>
+        {short ? (
+          <Box height={1} overflow="hidden">
+            <Button
+              key="author"
+              plain
+              label={`${short.author || 'YouTube'} ↗`}
+              onPress={() => void openInBrowser($, short.id)}
+            />
+          </Box>
+        ) : (
+          <Text> </Text>
+        )}
+        {/* Two rows whatever the title's length, so the buttons stay put. */}
+        <Box height={2} overflow="hidden">
+          <Text wrap="wrap">{short?.title ?? ' '}</Text>
+        </Box>
         <Text dimColor wrap="truncate">
           {notes || ' '}
         </Text>
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button key="previous" plain hotkey="k" label="Previous" onPress={() => void skip($, -1)} />
+          <Button key="previous" plain hotkey="k" label="Prev" onPress={() => void skip($, -1)} />
           <Button
             key="pause"
             plain
@@ -491,11 +503,21 @@ async function skip($: EngineInterface, by: number) {
 async function togglePause($: EngineInterface) {
   const s = await read($, shorts)
   if (s.status === 'paused') return void play($, s.pos)
+  await pause($)
+}
+
+async function pause($: EngineInterface) {
   const p = player
   if (p === undefined) return
   epoch++
   stopPlayer()
   await setShorts($, s => ({ ...s, status: 'paused', pos: p.pos }))
+}
+
+/** Pauses here first, so the browser's copy is not heard over this one. */
+async function openInBrowser($: EngineInterface, id: string) {
+  await pause($)
+  await $.process.run(['open', `https://www.youtube.com/shorts/${id}`])
 }
 
 async function toggleMute($: EngineInterface) {

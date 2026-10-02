@@ -118,11 +118,11 @@ How it works:
    - **Pause**: stop ffmpeg and note the position; **resume**: start it again with `-ss <position>`. **Mute** and **a pane size change** also restart ffmpeg at the current position. A video with no audio track outputs no sound at all.
    - **Next Short when one ends**: on `progress=end` with ffmpeg exiting 0, move on to the next; anything else shows an error, and `j` skips.
 4. **Display**:
-   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 4 rows left below for author, title, progress and buttons (`videoBox`).
+   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 5 rows left below for author, a two-row title, progress and buttons (`videoBox`).
    - It first draws with `Image` and `{ file, format: 'rgb', width, height, generation }`; the frame is about columns × 10 pixels wide, at most 480 (`frameSize`).
    - When `blit` is refused with "draws its alt", record `mode: 'raster'` in `$.state` (Image is not tried again this session) and restart ffmpeg at the current position. In Raster mode ffmpeg outputs small 32-color frames of `columns × (rows × 2)`; the mod reads them with `$.fs.read`, turns them into `▀` blocks, and blits those.
    - A redraw reuses the source or cells of the last successful blit, so the picture does not flash blank.
-5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `m` mute, `x` close. Below the video are the author, the title, and a status line like "▶ 0:12 / 0:28 · muted"; when the last `feed` call was signed out it says "signed out: not your feed".
+5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `m` mute, `x` close. Below the video are the author (a Button: a click in the fullscreen terminal, or Tab then Enter, pauses here and opens the Short in the browser with `open`), the title (two rows), and a status line like "▶ 0:12 / 0:28 · muted"; when the last `feed` call was signed out it says "signed out: not your feed".
 6. **Reporting watch history**: when a Short has played to `min(10 seconds, half its length)`, call `yt.py watched` once, at most once per Short (tracked in a module variable, so a hot reload may report one again, which is harmless). Preloading reports nothing.
 7. **Cleanup**:
    - `x`: clean up first, then close the pane (a `$.ui.close` the plugin calls itself does not fire its own `ui.close` hook).
