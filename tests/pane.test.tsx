@@ -15,8 +15,8 @@ const PANE = {
 
 test('before anything plays: the hint, and the five keys', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Text', text: '按 /shorts 开始' })).toBeDefined()
-  for (const label of ['上一条', '暂停', '下一条', '静音', '关闭']) {
+  expect(await ui.find({ type: 'Text', text: 'Run /shorts to start' })).toBeDefined()
+  for (const label of ['Previous', 'Pause', 'Next', 'Mute', 'Close']) {
     expect(await ui.find({ type: 'Button', text: label })).toBeDefined()
   }
   await ui.unmount()
@@ -24,7 +24,7 @@ test('before anything plays: the hint, and the five keys', async $ => {
 
 test('off the terminal it says so instead of drawing a player', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'desktop', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /只能在终端/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /only in the terminal/ })).toBeDefined()
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
   await ui.unmount()
 })

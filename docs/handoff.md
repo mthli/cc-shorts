@@ -1,192 +1,192 @@
-# cc-shorts 交接文档
+# cc-shorts handoff
 
-> 2026-10-02 写成调研和方案；同日按方案实现了 v1（commit `0d47b6d`），本文档已更新到和代码一致。下一步是继续优化，待办见文末“待验证与待优化”。
+> Research and plan written on 2026-10-02; v1 was built from the plan the same day (commit `0d47b6d`), and this document has been updated to match the code. Next up is further optimization; the open items are under "Still to verify and optimize" at the end.
 
-## 目标
+## Goal
 
-做一个 Claude Code mod：在终端侧边的 Pane 里播放 **YouTube Shorts 推荐流**（个性化、可以一直往下刷、有声音）。对用户来说，推荐流是这个 mod 最核心的部分，只放一个固定列表不算完成。
+A Claude Code mod that plays the **YouTube Shorts feed** in a pane beside the terminal (personalized, endlessly scrollable, with sound). For the user, the feed is the heart of this mod: playing a fixed list does not count as done.
 
-## 已确定的决策
+## Decisions made
 
-| 项目 | 决定 |
+| Item | Decision |
 |---|---|
-| 内容来源 | 用户自己账号的 YouTube Shorts 推荐流（登录态取自 Chrome cookie） |
-| 放完一条 | **自动播下一条** |
-| 点赞 / 不感兴趣 | **v1 不做** |
-| 打开方式 | **只能用 `/shorts` 手动打开**，不在 session 开始时自动打开 |
-| 终端 | 主要用 Ghostty（真像素），**iTerm2 也要支持**（字符块降级） |
-| 声音 | 要 |
-| Instagram Reels | 不做（理由见“已否决的方案”） |
-| 插件目录 | **仓库根目录就是插件目录**，开发时用 `claude --plugin-dir ~/GitHub/cc-shorts` 加载 |
-| 协作方式 | 用户希望先看方案、同意后再写代码；沟通用简体中文 |
+| Content source | The user's own YouTube Shorts feed (signed in through Chrome cookies) |
+| When a Short ends | **Play the next one automatically** |
+| Like / not interested | **Not in v1** |
+| How it opens | **Only by hand with `/shorts`**; it does not open on its own at session start |
+| Terminal | Mainly Ghostty (real pixels); **iTerm2 must work too** (character-block fallback) |
+| Sound | Yes |
+| Instagram Reels | No (see "Rejected approaches" for why) |
+| Plugin directory | **The repo root is the plugin directory**; load it in development with `claude --plugin-dir ~/GitHub/cc-shorts` |
+| Way of working | The user wants to see the plan and agree to it before any code is written. Conversation is in Simplified Chinese; code, comments and docs are in English |
 
-## 调研结论一：Claude Code mod API
+## Research finding 1: the Claude Code mod API
 
-环境：Claude Code 2.1.287，mod API 处于 EARLY ACCESS，可能变动。详细的类型定义在加载 `plugin-authoring` skill 时会生成；用 `--plugin-dir` 加载过一次之后，引擎还会把类型放到 `.claude-plugin/types/`（自带 `.gitignore`），并在仓库根目录生成 `tsconfig.json` 继承它。**改 mod 前先加载这个 skill**，再按名字去查具体签名。
+Environment: Claude Code 2.1.287. The mod API is in EARLY ACCESS and may change. Full type definitions are generated when the `plugin-authoring` skill loads; after one load with `--plugin-dir`, the engine also puts the types in `.claude-plugin/types/` (with its own `.gitignore`) and generates a `tsconfig.json` at the repo root that extends them. **Load that skill before changing the mod**, then look up specific signatures by name.
 
-和本项目相关的能力和限制：
+Capabilities and limits that matter to this project:
 
-- **Pane**：调用 `$.ui.open({ id, title })` 打开，由 `ui.render` hook 匹配 `{ component: 'Pane', requestId: id }` 来画。用户主动打开（slash command 或按钮）时任何宽度都能显示；程序自动打开时终端要 ≥144 列才显示。`/shorts` 属于用户主动打开。可用的大小从 `e.props.bodyColumns` 和 `e.props.scroll.bodyRows` 读；只改变高度不会触发重画。
-- **`Image` 元素**（只在终端）：kitty 和 Ghostty 显示真像素，**其他终端（包括 iTerm2、tmux 里）只显示 `alt` 文字**。给它设 `key` 之后，可以用 `$.ui.blit({ requestId, key, source })` 换帧，不用整个重画；每秒最多接受 120 次，实际约 60 帧上屏。
-  - `ImageSource` 可以是 `{ png }`（base64，最大 2 MiB）、`{ rgba, width, height }`、`{ file, format: 'png' | 'rgb' | 'rgba', width, height, generation? }`，或 `{ shm, ... }`（macOS 上名字不超过 30 字符）。
-  - 用 `file` 或 `shm` 时，**终端自己去读文件**，像素数据不经过 `$`，开销最小。`file` 要用绝对路径；同一路径内容变了，要换一个 `generation`，否则终端认为没变、不会重读。
-  - 在不支持图片的终端里，`blit` 会返回 `{ deny }`。实测原文是 `the Image draws its alt here: the terminal draws no placeholder images (env: inside tmux or screen)`。**靠匹配其中的 `alt` 在运行时判断要不要降级到 Raster。** 刚打开、还没画出来时也会被拒（`no Raster of its own is mounted …`），这种不算降级，下一帧再试。
-- **`Raster` 元素**（只在终端）：一个固定大小的字符网格。`cells` 是 base64 编码的 little-endian u32 三元组 `[codePoint, fg 0x00RRGGBB, bg]`，一个格子一组。同屏最多 1024 种颜色组合，超出的取最接近的颜色。也用 `$.ui.blit` 刷新，但 `columns × rows` 必须和已经画出来的一致，否则被拒。在 iTerm2 里用 `▀`（上半块）画，每个格子表示上下 2 个像素。
-- **`$` 不能存进模块变量**：`claude plugin validate` 会报 “$ itself is assigned”，模块根本加载不了。可以把 `$` 当参数传给自己的函数，也可以在闭包里用（按钮的 `onPress`、定时器回调都可以），所以代码里每个辅助函数都显式带一个 `$` 参数。
-- **`$.process.run(argv, { stdin, timeoutMs })`**：跑一次、等它结束才返回；stdout 和 stderr 各最多 4 MiB 文本；默认超时 30 秒，最长 10 分钟。
-- **`$.process.spawn`**：可以流式读输出，但只能读 **UTF-8 文本**，**不能用来传二进制帧**（用来读 ffmpeg 的 `-progress` 文本正合适）。子进程的生命周期跟读输出的循环绑定：循环结束、对 stream 调 `return()`、`next.signal` 中止、或 mod 卸载，都会杀掉子进程。**被主动 `return()` 掉的 stream，它的 `result` 不一定会 settle**，所以代码里停掉的播放器不去等 `result`。
-- **`$.fs.read`**：单次最多 4 MiB，用 `{ as: 'bytes' }` 读出 `{ base64 }`。`$.fs.write` 只能写文本。**`$.fs` 没有删除和建目录**：删文件、建目录都用 `$.process.run(['rm' | 'mkdir' | 'find', …])`。
-- **`$.plugin.root`**：插件目录的绝对路径，用来定位 `helper/yt.py`。
-- **`$.audio.play`**：参数可以是 `{ asset }`、`{ url }` 或 `{ base64, mime }`；macOS 上用 `afplay` 播放，**不能跳到指定位置播**；`shouldLoop` 加 `signal` 可以循环播放或中途停止。v1 没用它，声音由 ffmpeg 直接输出。
-- **`$.clock.every / after / sleep`**：定时器。mod 热重载时，所有定时器都会被取消。
-- **`$.store`** 跨 session 保存数据；**`$.state`** 只在当前 session 内有效、**热重载后还在**，要在 `types/index.d.ts` 里声明类型。模块自己的变量在热重载后会清空。
-- **`ui.close`**：用户手动关闭（ctrl+x x、Pane 的关闭标记）会触发插件的 `ui.close` hook；**插件自己调用 `$.ui.close` 不会触发自己的 hook**（日志里写 `skipped: re-entry`），所以自己关闭前要先自己清理。
-- **Button 的 `hotkey`** 只能是一个数字或一个小写字母，而且只在 Pane 有焦点时生效（`ctrl+x tab` 或鼠标点一下；`$.ui.open` 时传 `focus: true` 可以一打开就拿到焦点）。
-- **只能在 CLI 终端版用**：`$.process`、`Image`、`Raster` 在桌面版的 Code 标签页里都不可用。
-- **类型**：TypeScript 的 es2023 标准库里没有 `Uint8Array.prototype.toBase64` 和 `Uint8Array.fromBase64` 的声明，但运行环境里有，所以在 `hooks/globals.d.ts` 里补了声明。
-- **加载方式**：开发时用 `claude --plugin-dir <插件目录>`；想每个 session 都加载，就在 `~/.claude/settings.json` 的 `env` 里设 `CLAUDE_CODE_PLUGIN_DIRS`。交互式 session 会监听这个目录，改了文件会自动热重载（热重载时 `register` 和 `session.start` 都会重新跑）。插件结构是 `.claude-plugin/plugin.json` + `hooks/hooks.json` + `hooks/register.tsx`。检查用 `claude plugin validate .`、`claude plugin test .` 和 `bunx -p typescript@5 tsc -p .`。测试环境里没有 fs、process 和网络，只能测纯函数和界面。
+- **Pane**: open it with `$.ui.open({ id, title })`; a `ui.render` hook matching `{ component: 'Pane', requestId: id }` draws it. When the user opens it (a slash command or a button), it shows at any width; when a program opens it on its own, the terminal needs ≥144 columns. `/shorts` counts as the user opening it. Read the usable size from `e.props.bodyColumns` and `e.props.scroll.bodyRows`; a change in height alone does not trigger a redraw.
+- **The `Image` element** (terminal only): kitty and Ghostty show real pixels; **every other terminal (including iTerm2, and anything inside tmux) shows only the `alt` text**. Once it has a `key`, `$.ui.blit({ requestId, key, source })` swaps frames without a full redraw; it accepts at most 120 calls a second, and about 60 frames actually reach the screen.
+  - An `ImageSource` can be `{ png }` (base64, at most 2 MiB), `{ rgba, width, height }`, `{ file, format: 'png' | 'rgb' | 'rgba', width, height, generation? }`, or `{ shm, ... }` (names of at most 30 characters on macOS).
+  - With `file` or `shm`, **the terminal reads the file itself**, so the pixel data never passes through `$`: the cheapest option. `file` needs an absolute path; when the contents of the same path change, give it a new `generation`, or the terminal assumes nothing changed and does not read it again.
+  - In a terminal without image support, `blit` returns `{ deny }`. The exact text seen in testing: `the Image draws its alt here: the terminal draws no placeholder images (env: inside tmux or screen)`. **The fallback to Raster is decided at runtime by matching the `alt` in it.** It is also refused right after opening, before anything is drawn (`no Raster of its own is mounted …`); that is not a reason to fall back, so try again on the next frame.
+- **The `Raster` element** (terminal only): a fixed-size grid of characters. `cells` is base64 of little-endian u32 triples `[codePoint, fg 0x00RRGGBB, bg]`, one triple per cell. At most 1024 color pairs per screen; any beyond that take the closest color. It is also refreshed with `$.ui.blit`, but `columns × rows` must match what is already drawn, or the blit is refused. In iTerm2 it draws with `▀` (upper half block), each cell standing for 2 pixels, one above the other.
+- **`$` cannot be stored in a module variable**: `claude plugin validate` reports "$ itself is assigned" and the module does not load at all. `$` can be passed as an argument to your own functions and used inside closures (a button's `onPress`, a timer callback), so every helper function in the code takes an explicit `$` parameter.
+- **`$.process.run(argv, { stdin, timeoutMs })`**: runs once and returns when the process ends; stdout and stderr are each at most 4 MiB of text; the default timeout is 30 seconds, the longest 10 minutes.
+- **`$.process.spawn`**: streams output, but only **UTF-8 text**, so it **cannot carry binary frames** (it suits reading ffmpeg's `-progress` text). The child process lives as long as the loop reading its output: ending the loop, calling `return()` on the stream, aborting through `next.signal`, or unloading the mod all kill it. **A stream ended with `return()` may never settle its `result`**, so the code does not wait on `result` for a player it stopped.
+- **`$.fs.read`**: at most 4 MiB per call; `{ as: 'bytes' }` reads out `{ base64 }`. `$.fs.write` writes text only. **`$.fs` cannot delete or create directories**: deleting files and creating directories go through `$.process.run(['rm' | 'mkdir' | 'find', …])`.
+- **`$.plugin.root`**: the absolute path of the plugin directory, used to find `helper/yt.py`.
+- **`$.audio.play`**: takes `{ asset }`, `{ url }` or `{ base64, mime }`; on macOS it plays through `afplay` and **cannot start from a given position**; `shouldLoop` plus `signal` loops or stops playback partway. v1 does not use it: ffmpeg outputs the sound directly.
+- **`$.clock.every / after / sleep`**: timers. A hot reload of the mod cancels every timer.
+- **`$.store`** keeps data across sessions; **`$.state`** lasts only for the current session, **survives a hot reload**, and needs its type declared in `types/index.d.ts`. The module's own variables are reset by a hot reload.
+- **`ui.close`**: a close by the user (ctrl+x x, the pane's close mark) fires the plugin's `ui.close` hook; **a `$.ui.close` the plugin calls itself does not fire its own hook** (the log says `skipped: re-entry`), so the plugin must clean up before it closes the pane itself.
+- **A Button's `hotkey`** can only be a single digit or a single lowercase letter, and it works only while the pane has focus (`ctrl+x tab` or a mouse click; passing `focus: true` to `$.ui.open` gives it focus as it opens).
+- **CLI terminal only**: `$.process`, `Image` and `Raster` are all unavailable in the desktop app's Code tab.
+- **Types**: TypeScript's es2023 standard library does not declare `Uint8Array.prototype.toBase64` or `Uint8Array.fromBase64`, but the runtime has them, so `hooks/globals.d.ts` adds the declarations.
+- **Loading**: in development, `claude --plugin-dir <plugin dir>`; to load it in every session, set `CLAUDE_CODE_PLUGIN_DIRS` in the `env` of `~/.claude/settings.json`. An interactive session watches that directory and hot-reloads on file changes (a hot reload runs `register` and `session.start` again). The plugin is laid out as `.claude-plugin/plugin.json` + `hooks/hooks.json` + `hooks/register.tsx`. Check it with `claude plugin validate .`, `claude plugin test .` and `bunx -p typescript@5 tsc -p .`. The test environment has no fs, process or network, so only pure functions and the UI can be tested.
 
-## 调研结论二：推荐流（2026-10-02 实测，yt-dlp 2026.08.19）
+## Research finding 2: the feed (tested 2026-10-02, yt-dlp 2026.08.19)
 
-| 来源 | 结果 |
+| Source | Result |
 |---|---|
-| `yt-dlp ":ytrec"`（首页推荐） | 150 条里 **0 条 Shorts**：yt-dlp 把 Shorts 栏丢掉了 |
-| 首页原始的 `ytInitialData` | 有一个 Shorts 栏（`shortsLockupViewModel`），**第一页约 18 条**个性化 Shorts，后面几页没有 |
-| `https://www.youtube.com/feed/subscriptions/shorts` | 可用，全是 Shorts，当兜底。**要用一个全新的 `YoutubeDL` 实例加 `extract_flat`**；用请求过首页的那个实例会返回 401 |
-| **`reel/reel_watch_sequence`（非官方接口）** | ✅ **能无限刷**：每批 10–19 条，全是新的，每批都带下一批的入口；全是 9:16 竖屏，内容和账号首页的兴趣一致 |
-| `instagram:user` | yt-dlp 自己标记为 CURRENTLY BROKEN |
+| `yt-dlp ":ytrec"` (home page recommendations) | **0 Shorts** out of 150: yt-dlp drops the Shorts shelf |
+| The home page's raw `ytInitialData` | Has a Shorts shelf (`shortsLockupViewModel`): **about 18** personalized Shorts **on the first page**, none on later pages |
+| `https://www.youtube.com/feed/subscriptions/shorts` | Works and is all Shorts; used as the fallback. **Needs a brand-new `YoutubeDL` instance with `extract_flat`**; an instance that has already requested the home page gets a 401 |
+| **`reel/reel_watch_sequence` (unofficial API)** | ✅ **Scrolls endlessly**: 10–19 Shorts per batch, all new, each batch carrying the way to the next; all 9:16 vertical, matching the interests of the account's home page |
+| `instagram:user` | Marked CURRENTLY BROKEN by yt-dlp itself |
 
-**无限刷的调用流程**（完整可运行的探测脚本见 [`probe_reel.py`](./probe_reel.py)，正式实现在 [`helper/yt.py`](../helper/yt.py) 的 `Feed`）：
+**How endless scrolling works** (a complete runnable probe script is in [`probe_reel.py`](./probe_reel.py); the real implementation is `Feed` in [`helper/yt.py`](../helper/yt.py)):
 
-1. 带 cookie 请求 `https://www.youtube.com/` → 用 `extract_ytcfg` 和 `extract_yt_initial_data` 拿到页面配置和初始数据 → 在里面递归找 `reelWatchEndpoint`，作为起点。起点里有 `videoId`、`playerParams`、`params`、`sequenceParams`，以及 `sequenceProvider: REEL_WATCH_SEQUENCE_PROVIDER_RPC`。
-2. `POST reel/reel_item_watch`，body 是 `{ playerRequest: { videoId, params: playerParams }, params, disablePlayerResponse: true }`，从响应里找 `sequenceContinuation`。
-3. `POST reel/reel_watch_sequence`，body 是 `{ sequenceParams }`。响应里 `entries[].command.reelWatchEndpoint.videoId` 就是这一批视频；`continuationEndpoint` 里的 `token` 作为下一批的 `sequenceParams`，循环调用即可。
-4. 登录签名和请求头直接复用 yt-dlp：`ie._call_api(ep, body, id, context=ytcfg['INNERTUBE_CONTEXT'], headers=ie.generate_api_headers(ytcfg=ytcfg))`，其中 `ie = YoutubeDL({'cookiesfrombrowser': ('chrome',)}).get_info_extractor('YoutubeTab')`。注意它用的是 **pipx 安装的 yt-dlp 自带的 Python**：`~/.local/pipx/venvs/yt-dlp/bin/python`，系统的 `python3` 里没装 `yt_dlp`。
+1. Request `https://www.youtube.com/` with cookies → get the page config and initial data with `extract_ytcfg` and `extract_yt_initial_data` → search them recursively for a `reelWatchEndpoint` to start from. It holds `videoId`, `playerParams`, `params`, `sequenceParams`, and `sequenceProvider: REEL_WATCH_SEQUENCE_PROVIDER_RPC`.
+2. `POST reel/reel_item_watch` with body `{ playerRequest: { videoId, params: playerParams }, params, disablePlayerResponse: true }`, and find `sequenceContinuation` in the response.
+3. `POST reel/reel_watch_sequence` with body `{ sequenceParams }`. The response's `entries[].command.reelWatchEndpoint.videoId` are this batch's videos; the `token` in `continuationEndpoint` is the next batch's `sequenceParams`, so just call it in a loop.
+4. Sign-in signing and request headers come straight from yt-dlp: `ie._call_api(ep, body, id, context=ytcfg['INNERTUBE_CONTEXT'], headers=ie.generate_api_headers(ytcfg=ytcfg))`, where `ie = YoutubeDL({'cookiesfrombrowser': ('chrome',)}).get_info_extractor('YoutubeTab')`. Note that this runs on **the Python bundled with the pipx-installed yt-dlp**: `~/.local/pipx/venvs/yt-dlp/bin/python`; the system `python3` has no `yt_dlp`.
 
-**没有广告**：重新抽查 3 批共 41 条，全是带 `videoId` 的 `reelWatchEndpoint`，没有广告或其他条目。代码里仍然只收带 `videoId` 的条目。一次 `feed` 调用约 10 秒（大部分是读 cookie 和请求首页）。
+**No ads**: a fresh spot check of 3 batches, 41 Shorts in all, found only `reelWatchEndpoint`s with a `videoId`, no ads or other entries. The code still takes only entries that have a `videoId`. One `feed` call takes about 10 seconds (mostly reading cookies and requesting the home page).
 
-**偶尔变成未登录的根因（重要）**：yt-dlp 读 Chrome cookie 时，会在 Chrome 目录下用 `os.walk` 递归找**最近修改过的 `Cookies` 文件**；就算指定了 profile，也照样会搜进子目录。Chrome 里有个扩展在 `Default/Storage/ext/glic/…/Cookies` 有自己的一份 cookie 数据库，里面只有 google 的 cookie。哪个文件刚被写过，yt-dlp 就读哪个，所以请求时有时是登录状态、有时不是。`helper/yt.py` 在 import 时把 `yt_dlp.cookies._find_files` 包了一层，跳过路径里带 `/Storage/` 的文件。**下载和回传观看记录也必须走这个打过补丁的 Python**，不能直接调用 yt-dlp 命令行。
+**Root cause of the occasional signed-out feed (important)**: when yt-dlp reads Chrome cookies, it uses `os.walk` to search the Chrome directory recursively for **the most recently modified `Cookies` file**; even with a profile given, it still searches into subdirectories. A Chrome extension keeps its own cookie database at `Default/Storage/ext/glic/…/Cookies`, holding only Google cookies. yt-dlp reads whichever file was written last, so requests are sometimes signed in and sometimes not. On import, `helper/yt.py` wraps `yt_dlp.cookies._find_files` to skip files with `/Storage/` in their path. **Downloads and watch-history reports must also go through this patched Python**, never the yt-dlp command line.
 
-**续推返回的元数据**：
+**Metadata returned by the sequence**:
 
-- 每批只有 1–3 条带 `unserializedPrefetchData.playerResponse`（里面有 `videoDetails.title`、`author`、`lengthSeconds`，以及 `streamingData`）。
-- 其余条目只有 `videoId`，`overlay` 里没有标题。
-- **标题、作者、时长统一在下载时从 yt-dlp 的元数据里取**，下载本来就要解析这些信息。也可以用公开的 oEmbed（`https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/shorts/<id>`），实测可用，不需要 cookie。
+- Only 1–3 entries per batch carry `unserializedPrefetchData.playerResponse` (with `videoDetails.title`, `author`, `lengthSeconds`, and `streamingData`).
+- The other entries have only a `videoId`, and no title in their `overlay`.
+- **Title, author and duration all come from yt-dlp's metadata at download time**, since the download parses that information anyway. The public oEmbed (`https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/shorts/<id>`) also works when tested, and needs no cookies.
 
-## 调研结论三：下载与解码（实测）
+## Research finding 3: downloading and decoding (tested)
 
-- **下载先不带 cookie**：不带 cookie 一条约 4–5 秒；带 cookie 约 14 秒，其中读 cookie 约 4 秒，另外登录状态下 yt-dlp 会多请求几种客户端接口（web creator、tv 等）。所以先不带 cookie 下载，失败了（年龄限制、机器人校验等）再带 cookie 重试。
-- **挑格式要按宽度筛**：竖屏视频的 `height` 是长边，用 `height<=480` 会错拿成 240x426。用的是 `bv*[width<=480][ext=mp4]+ba[ext=m4a]/b[width<=480]/b`。
-- **不能预先把整条视频转成 PNG**：50 秒、24fps、360x640 转完是 1211 张图、312 MB，耗 62 秒 CPU。
-- **一个 ffmpeg 进程能同时出画面和声音**：`-re` 按真实速度解码；画面用 `-f image2 -update 1 -atomic_writing 1 frame.rgb` 每帧覆盖同一个文件（先写临时文件再改名，读的一方不会读到写了一半的帧）；声音用 `-f audiotoolbox -` 直接从 macOS 扬声器出。4 秒的片段用 4.18 秒，节奏没被声音输出拖慢。
-- **用 `-ss` 跳到中间重启很快**：0.2 秒就出第一帧，所以暂停后靠重启 ffmpeg 来继续是可行的。
-- **iTerm2 降级的调色板**：每帧用 `palettegen=max_colors=32:stats_mode=single` 加 `paletteuse=new=1:dither=none` 压到 32 色，这样同屏颜色组合最多 32×32=1024 种，正好在 Raster 的上限内。48x96 的小帧比实时快十几倍，单帧实测只有 349 种组合。
-- 转成 48x84 的原始 rgb（给 Raster 用）只要 0.27 秒；抽音轨（`-c:a copy`）只要 0.03 秒。
-- 本机已经装了 `ffmpeg`（9.0.2，带 `audiotoolbox`）、`ffprobe`、`yt-dlp`（pipx），以及 `deno`、`node`、`bun`（yt-dlp 解 YouTube 的 JS 校验时会用 deno）。
+- **Download without cookies first**: without cookies a Short takes about 4–5 seconds; with cookies about 14 seconds, about 4 of them reading cookies, plus yt-dlp requests more client APIs (web creator, tv, and so on) when signed in. So download without cookies first, and retry with cookies only on failure (age restrictions, bot checks, and the like).
+- **Pick the format by width**: a vertical video's `height` is its long side, so `height<=480` wrongly picks 240x426. The selector is `bv*[width<=480][ext=mp4]+ba[ext=m4a]/b[width<=480]/b`.
+- **Do not convert a whole video to PNGs up front**: 50 seconds at 24fps and 360x640 comes to 1211 images, 312 MB, and 62 seconds of CPU.
+- **One ffmpeg process can output both picture and sound**: `-re` decodes at real-time speed; the picture uses `-f image2 -update 1 -atomic_writing 1 frame.rgb` to overwrite the same file every frame (it writes a temporary file and renames it, so the reader never sees a half-written frame); the sound goes straight to the macOS speakers with `-f audiotoolbox -`. A 4-second clip took 4.18 seconds: the sound output did not slow the pace.
+- **Restarting mid-video with `-ss` is fast**: the first frame comes out in 0.2 seconds, so resuming after a pause by restarting ffmpeg is workable.
+- **The palette for the iTerm2 fallback**: each frame is squeezed to 32 colors with `palettegen=max_colors=32:stats_mode=single` plus `paletteuse=new=1:dither=none`, so a screen has at most 32×32=1024 color pairs, exactly Raster's limit. Small 48x96 frames run more than ten times faster than real time, and a single frame measured only 349 pairs.
+- Converting to 48x84 raw rgb (for Raster) takes only 0.27 seconds; extracting the audio track (`-c:a copy`) only 0.03 seconds.
+- This machine already has `ffmpeg` (9.0.2, with `audiotoolbox`), `ffprobe`, `yt-dlp` (pipx), plus `deno`, `node` and `bun` (yt-dlp uses deno to solve YouTube's JS challenges).
 
-## v1 实现现状
+## Where v1 stands
 
 ```
-/shorts ──► Pane（focus，请求 50 列 × 40 行）
-              │  ui.render: Image（Ghostty）或 Raster（iTerm2）+ 作者 / 标题 / 进度 + 五个按钮
+/shorts ──► Pane (focus, asks for 50 columns × 40 rows)
+              │  ui.render: Image (Ghostty) or Raster (iTerm2) + author / title / progress + five buttons
               ▼
-  helper/yt.py feed ──► 视频 ID 队列 ──► helper/yt.py download（预下载后面 2 条）──► ffmpeg -re
-     ▲  token 和看过的 ID 存在 $.store                                │ 画面：frame-N.rgb（原子覆盖）
-     └──────────────── 剩 ≤5 条时补货 ◄──────────────────────────────┘ 声音：audiotoolbox
-                                                                       进度：-progress pipe:1 → $.process.spawn
+  helper/yt.py feed ──► queue of video IDs ──► helper/yt.py download (preloads the next 2) ──► ffmpeg -re
+     ▲  token and watched IDs kept in $.store                         │ picture: frame-N.rgb (atomic overwrite)
+     └──────────────── refill at ≤5 left ◄───────────────────────────┘ sound: audiotoolbox
+                                                                       progress: -progress pipe:1 → $.process.spawn
 ```
 
-文件分工：
+What each file does:
 
-- `helper/yt.py`：Python，三个子命令，每个都在 stdout 打印一行 JSON。mod 通过 `$.process.run([pipx 的 python, '-B', yt.py, …])` 调用（`-B` 避免在仓库里生成 `__pycache__`）。
-  - `feed`：stdin 传 `{ token, seen, want }`，返回 `{ ids, token, source, loggedIn }`。先用 token 续推；token 失效就从首页起点重新开始；都拿不到就退回订阅频道的 Shorts（这时 token 返回 null）。一次最多拉 3 批。
-  - `download ID DIR`：返回 `{ id, title, author, duration, width, height, hasAudio, path }`。
-  - `watched ID`：用 yt-dlp 的 `mark_watched` 把这一条写进账号的观看记录。
-- `hooks/lib.ts`：纯函数，没有 `$`，测试能全覆盖：画面尺寸、ffmpeg 参数、进度解析、帧转字符块、时间格式。
-- `hooks/register.tsx`：Pane、队列和预下载、播放、blit 循环、降级、按键、清理。
-- `types/index.d.ts`：`$.state` 里 `cc-shorts.shorts` 的类型（队列、当前位置、每条的元数据、播放状态、模式、帧信息、是否已登录）。
+- `helper/yt.py`: Python with three subcommands, each printing one JSON line on stdout. The mod calls it through `$.process.run([pipx's python, '-B', yt.py, …])` (`-B` keeps `__pycache__` out of the repo).
+  - `feed`: stdin takes `{ token, seen, want }`, returns `{ ids, token, source, loggedIn }`. It continues from the token first; if the token is dead it starts over from the home page; if neither gives anything it falls back to the subscriptions Shorts (and returns a null token). At most 3 batches per call.
+  - `download ID DIR`: returns `{ id, title, author, duration, width, height, hasAudio, path }`.
+  - `watched ID`: writes this Short to the account's watch history with yt-dlp's `mark_watched`.
+- `hooks/lib.ts`: pure functions with no `$`, fully covered by tests: picture size, ffmpeg arguments, progress parsing, frames to character blocks, time formatting.
+- `hooks/register.tsx`: the pane, queue and preloading, playback, the blit loop, the fallback, keys, cleanup.
+- `types/index.d.ts`: the type of `cc-shorts.shorts` in `$.state` (queue, current position, each Short's metadata, playback status, mode, frame details, whether signed in).
 
-具体做法：
+How it works:
 
-1. **推荐流**：队列里当前这条之后剩 ≤5 条时，调一次 `feed` 补货（同一时间只跑一个）。请求里的 `seen` 是 `$.store` 里看过的 ID（最多保留 1000 个）加上当前队列，避免重复。新的 token 存回 `$.store`。一条视频开始播放时才记为“看过”。
-2. **预下载**：当前这条和后面 2 条保持已下载；下载一个接一个排队跑，失败的允许以后再试。比上一条更早的视频文件会被删掉（留一条给 `k` 回看）。下载目录是 `$TMPDIR/cc-shorts/<session id>/`。连续 3 条下载失败就停下来，提示检查网络后按 `j` 重试。
-3. **播放**：每条一个 `ffmpeg -re`，参数见 `ffmpegArgs`。
-   - 画面写到 `frame-N.rgb`（N 每启动一次 ffmpeg 加 1），每帧原子覆盖；新的一条开始时，用 `find` 删掉目录里其他所有帧文件。不在停止时删，是因为暂停期间画面还要显示最后那一帧，而且正在被杀掉的旧 ffmpeg 可能在删除之后又写进一帧。
-   - 进度用 `-progress pipe:1 -stats_period 0.25` 输出文本，mod 通过 `$.process.spawn` 读 `out_time_us` 算出当前位置；每过一整秒写一次 `$.state`，用来刷新进度显示。
-   - mod 用 `$.clock.every(33)` 把当前帧文件 blit 到 Pane 上，同一时间只有一次 blit 在进行。
-   - **暂停**：停掉 ffmpeg，记下位置；**继续**：用 `-ss <位置>` 重新启动。**静音**和 **Pane 大小变化**也是在当前位置重启 ffmpeg。没有音轨的视频直接不输出声音。
-   - **放完自动下一条**：读到 `progress=end` 且 ffmpeg 退出码为 0，就切到下一条；其他情况显示错误信息，按 `j` 跳过。
-4. **显示**：
-   - 画面框按 9:16、假设字符格宽高比 1:2 计算，即每 9 列配 8 行，下面留 4 行放作者、标题、进度和按钮（`videoBox`）。
-   - 先用 `Image` 加 `{ file, format: 'rgb', width, height, generation }` 画，帧宽约为列数 × 10 像素，最大 480（`frameSize`）。
-   - `blit` 因为“draws its alt”被拒，就把 `mode: 'raster'` 记进 `$.state`（这个 session 里不再尝试 Image），在当前位置重启 ffmpeg。Raster 模式下 ffmpeg 输出 `列数 × (行数 × 2)` 的 32 色小帧，mod 用 `$.fs.read` 读出来，转成 `▀` 字符块再 blit。
-   - 重画时沿用上一次 blit 成功的 source 或 cells，避免画面闪成空白。
-5. **交互**：Pane 有焦点时，`j` 下一条、`k` 上一条（从头播）、`p` 暂停 / 继续、`m` 静音、`x` 关闭。视频下方显示作者、标题，以及“▶ 0:12 / 0:28 · 静音”这样的状态行；最后一次 `feed` 是未登录时会提示“未登录，推荐不是你的”。
-6. **回传观看记录**：一条播放到 `min(10 秒, 时长的一半)` 时，调一次 `yt.py watched`，每条只回传一次（记录在模块变量里，热重载后可能重复回传一次，无害）。预下载不会回传。
-7. **清理**：
-   - 按 `x`：先自己清理再关 Pane（插件自己调用 `$.ui.close` 不会触发自己的 `ui.close` hook）。
-   - 用户手动关闭：`ui.close` hook 清理。
-   - 清理指：停掉 ffmpeg 和定时器，把状态设回 idle，删除整个 session 临时目录。队列、当前位置和静音设置保留，再次 `/shorts` 会从当前这条、关闭时的位置接着播。
-   - 热重载：旧模块的 ffmpeg 和定时器由引擎自动停掉。`session.start` 里如果 Pane 还开着且原来在播放，就从记下的位置接着播；如果正处于暂停且是 Raster 模式，就从暂停那一帧的文件重新算出字符块再重画（屏幕上的字符块存在模块变量里，重载后就没了）；如果 Pane 已经关了，就清理。
-   - session 结束：停掉 ffmpeg，删除临时目录。
-   - 每次 `session.start` 还会删掉 `$TMPDIR/cc-shorts/` 下超过一天没动过的目录（之前 session 崩溃留下的）。
+1. **The feed**: when ≤5 Shorts are left in the queue after the current one, call `feed` once to refill it (only one call at a time). The request's `seen` is the watched IDs in `$.store` (up to 1000 kept) plus the current queue, to avoid repeats. The new token goes back into `$.store`. A Short counts as "watched" only once it starts playing.
+2. **Preloading**: the current Short and the next 2 stay downloaded; downloads queue up and run one after another, and a failed one may be tried again later. Video files older than the previous Short are deleted (one is kept for `k` to go back to). Downloads go to `$TMPDIR/cc-shorts/<session id>/`. After 3 downloads fail in a row it stops and says to check the network, then press `j` to retry.
+3. **Playback**: one `ffmpeg -re` per Short, with arguments from `ffmpegArgs`.
+   - The picture is written to `frame-N.rgb` (N goes up by 1 every time ffmpeg starts), atomically overwritten every frame; when a new Short starts, `find` deletes every other frame file in the directory. They are not deleted on stop because the last frame must stay on screen while paused, and an old ffmpeg still being killed may write one more frame after the delete.
+   - Progress comes out as text through `-progress pipe:1 -stats_period 0.25`; the mod reads `out_time_us` through `$.process.spawn` to work out the current position, and writes `$.state` once per whole second to refresh the progress display.
+   - The mod blits the current frame file to the pane with `$.clock.every(33)`, one blit at a time.
+   - **Pause**: stop ffmpeg and note the position; **resume**: start it again with `-ss <position>`. **Mute** and **a pane size change** also restart ffmpeg at the current position. A video with no audio track outputs no sound at all.
+   - **Next Short when one ends**: on `progress=end` with ffmpeg exiting 0, move on to the next; anything else shows an error, and `j` skips.
+4. **Display**:
+   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 4 rows left below for author, title, progress and buttons (`videoBox`).
+   - It first draws with `Image` and `{ file, format: 'rgb', width, height, generation }`; the frame is about columns × 10 pixels wide, at most 480 (`frameSize`).
+   - When `blit` is refused with "draws its alt", record `mode: 'raster'` in `$.state` (Image is not tried again this session) and restart ffmpeg at the current position. In Raster mode ffmpeg outputs small 32-color frames of `columns × (rows × 2)`; the mod reads them with `$.fs.read`, turns them into `▀` blocks, and blits those.
+   - A redraw reuses the source or cells of the last successful blit, so the picture does not flash blank.
+5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `m` mute, `x` close. Below the video are the author, the title, and a status line like "▶ 0:12 / 0:28 · muted"; when the last `feed` call was signed out it says "signed out: not your feed".
+6. **Reporting watch history**: when a Short has played to `min(10 seconds, half its length)`, call `yt.py watched` once, at most once per Short (tracked in a module variable, so a hot reload may report one again, which is harmless). Preloading reports nothing.
+7. **Cleanup**:
+   - `x`: clean up first, then close the pane (a `$.ui.close` the plugin calls itself does not fire its own `ui.close` hook).
+   - A close by the user: the `ui.close` hook cleans up.
+   - Cleaning up means: stop ffmpeg and the timers, set the status back to idle, and delete the whole session temp directory. The queue, current position and mute setting stay, so the next `/shorts` carries on with the current Short from where it was closed.
+   - Hot reload: the engine stops the old module's ffmpeg and timers itself. In `session.start`, if the pane is still open and was playing, it resumes from the noted position; if it is paused in Raster mode, it rebuilds the blocks from the paused frame's file and redraws (the blocks on screen live in a module variable, gone after a reload); if the pane is closed, it cleans up.
+   - Session end: stop ffmpeg and delete the temp directory.
+   - Every `session.start` also deletes directories under `$TMPDIR/cc-shorts/` untouched for more than a day (left behind by sessions that crashed).
 
-## 验证情况
+## Verification
 
-已经验证（2026-10-02）：
+Verified (2026-10-02):
 
-- 15 个测试（纯函数 + 界面）、`claude plugin validate`、`tsc` 都通过。
-- **端到端**：在 tmux 里开一个带 `--plugin-dir` 的 Claude Code 跑了完整流程。tmux 不支持图片协议，正好覆盖了“Image 被拒 → 降级成 Raster”：画面是真实彩色帧，进度在走，放完自动切下一条。`j`/`k`/`p`/`m`/`x` 都按过；暂停后继续能接上原来的位置；播放期间帧文件始终只有 1 个，mp4 保持 3～4 个；看满 10 秒后调用了 `watched`；按 `x`、热重载后都确认 ffmpeg 被杀、临时目录被删。用 `tmux capture-pane -p`（加 `-e` 可看颜色）读画面，用 `--debug-file` 看插件日志。
-- 用户试用后反馈“效果不错”，但没有逐项记录在哪个终端试的、具体看了哪些点。
+- 15 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
+- **End to end**: ran the whole flow in a Claude Code with `--plugin-dir` inside tmux. tmux does not support image protocols, which happens to cover "Image refused → fall back to Raster": the picture was real color frames, the progress moved, and the next Short played when one ended. `j`/`k`/`p`/`m`/`x` were all pressed; resuming after a pause picked up at the right position; during playback there was always exactly 1 frame file and 3–4 mp4s; `watched` was called after 10 seconds of watching; after `x` and after a hot reload, ffmpeg was confirmed killed and the temp directory deleted. The screen was read with `tmux capture-pane -p` (add `-e` to see colors), and the plugin log with `--debug-file`.
+- After trying it, the user said it "works well", but which terminal it was tried in and what exactly was checked were not recorded item by item.
 
-原计划“实现时先验证的点”的状态：
+Status of the original "verify first while implementing" points:
 
-1. **一个 ffmpeg 同时输出画面和 `audiotoolbox`**：能跑，节奏正常，`-ss` 重启 0.2 秒。**音画是否同步还没有人专门确认过。**
-2. **Ghostty 用 `blit` 读 `{ file, format: 'rgb' }` 能不能稳定到大约 30fps、CPU 占用多少**：**未验证。** iTerm2 下 blit 被拒并触发降级，在 tmux 里验证过，拒绝原因原文见调研结论一。
-3. **续推 token 能存多久**：**未验证**，要隔天打开才知道。token 失效时会自动从首页重新开始，不影响使用。
-4. **续推结果里有没有广告**：41 条里没有。
-5. **iTerm2 的 Raster 效果**：画面能正常显示；画质和帧率是否满意，需要用户在 iTerm2 本身里确认（tmux 会把颜色压成 256 色）。
+1. **One ffmpeg outputting both the picture and `audiotoolbox`**: works, the pace is right, and an `-ss` restart takes 0.2 seconds. **Nobody has specifically confirmed that audio and video stay in sync.**
+2. **Whether Ghostty `blit` reading `{ file, format: 'rgb' }` holds about 30fps steadily, and at what CPU cost**: **not verified.** Under iTerm2, blit is refused and the fallback kicks in; that was verified in tmux, and the exact refusal text is in research finding 1.
+3. **How long a sequence token lasts**: **not verified**; that needs opening it the next day. When the token dies it starts over from the home page on its own, so nothing breaks.
+4. **Whether the sequence contains ads**: none in 41 Shorts.
+5. **Raster quality in iTerm2**: the picture shows correctly; whether the quality and frame rate are good enough needs the user to check in iTerm2 itself (tmux squeezes colors down to 256).
 
-## 待验证与待优化
+## Still to verify and optimize
 
-- 上面没验证的三项：音画同步、Ghostty 帧率和 CPU、token 隔天还能不能用。
-- 暂停、静音、Pane 大小变化都要重启 ffmpeg，有约 0.2 秒的停顿。
-- Image 模式下，终端每帧都要重读一次整个帧文件（Ghostty 下约 400x712，每帧 850 KB）。
-- 每次 `feed` 约 10 秒、每次带 cookie 的调用都要重新读 cookie：每次都是一个新的 Python 进程。
-- Python 路径写死成 pipx 的 `~/.local/pipx/venvs/yt-dlp/bin/python`；`ffmpeg` 依赖 Claude Code 进程的 PATH。
+- The three unverified items above: audio/video sync, Ghostty frame rate and CPU, and whether a token still works the next day.
+- Pause, mute and pane size changes all restart ffmpeg, with a stall of about 0.2 seconds.
+- In Image mode the terminal rereads the whole frame file every frame (about 400x712 under Ghostty, 850 KB a frame).
+- Each `feed` takes about 10 seconds, and every call with cookies reads them again: every call is a new Python process.
+- The Python path is hard-coded to pipx's `~/.local/pipx/venvs/yt-dlp/bin/python`; `ffmpeg` depends on the PATH of the Claude Code process.
 
-## 风险
+## Risks
 
-- `reel/reel_watch_sequence` 是**非官方接口**，YouTube 一改就会失效。用登录态自动请求违反 YouTube 服务条款，有一定账号风险。请求频率应该接近人正常刷视频的速度（一批约 15 条，快用完才去拉下一批，一次最多 3 批）。
-- `helper/yt.py` 包了 yt-dlp 的**私有函数** `yt_dlp.cookies._find_files`，还用了 `_call_api`、`_download_webpage` 等内部方法；升级 yt-dlp 后可能要跟着改。
-- mod API 处于 EARLY ACCESS，升级 Claude Code 后可能要跟着改。
-- 读 Chrome cookie 时，macOS 可能会弹钥匙串授权框。
+- `reel/reel_watch_sequence` is an **unofficial API** and breaks the moment YouTube changes it. Automated requests with a signed-in session violate YouTube's Terms of Service and carry some risk to the account. The request rate should stay close to a person scrolling normally (about 15 Shorts per batch, fetching the next batch only when nearly out, at most 3 batches per call).
+- `helper/yt.py` wraps yt-dlp's **private function** `yt_dlp.cookies._find_files` and uses internal methods like `_call_api` and `_download_webpage`; upgrading yt-dlp may mean changes here.
+- The mod API is in EARLY ACCESS; upgrading Claude Code may mean changes here.
+- Reading Chrome cookies may pop up a macOS Keychain authorization prompt.
 
-## 已否决的方案
+## Rejected approaches
 
-- **只用 `yt-dlp ":ytrec"`**：拿不到 Shorts。
-- **完全自己做推荐**（用频道、关键词当候选，根据本地行为打分）：候选内容和推荐质量都远不如 YouTube 自己的算法，不符合用户对推荐流的要求。
-- **Instagram Reels**：私有接口风控很严，封号风险高，`instagram:user` 也已经坏了。
-- **预先把整条视频转成 PNG**：太占磁盘和 CPU，见调研结论三。
-- **用 `$.process.spawn` 传帧**：它只能传 UTF-8 文本。
-- **一圈循环覆盖的帧文件**（原方案）：`image2` 的 `-atomic_writing` 已经保证读不到写了一半的帧，一个文件就够了。
-- **`$.audio.play` 单独放抽出来的音轨**：同一个 ffmpeg 直接出声更简单，音画天然按同一个时钟走。
-- **下载和回传观看记录直接用 yt-dlp 命令行**：会读错 cookie 文件（见调研结论二），而且带 cookie 下载慢。
-- **按环境变量（`TERM_PROGRAM`）提前判断终端**：用 blit 被拒的结果判断更准，tmux 里的 Ghostty 也能正确降级。
-- **把 `$` 存进模块变量**：validate 不允许，模块加载不了。
+- **Only `yt-dlp ":ytrec"`**: gets no Shorts.
+- **Building our own recommendations** (channels and keywords as candidates, scored on local behavior): candidates and recommendation quality fall far short of YouTube's own algorithm, which does not meet the user's bar for the feed.
+- **Instagram Reels**: the private API's anti-abuse checks are strict, the risk of a ban is high, and `instagram:user` is already broken.
+- **Converting whole videos to PNGs up front**: too much disk and CPU; see research finding 3.
+- **Passing frames through `$.process.spawn`**: it carries only UTF-8 text.
+- **A ring of frame files overwritten in turn** (the original plan): `image2`'s `-atomic_writing` already guarantees no half-written frame is read, so one file is enough.
+- **Playing an extracted audio track separately with `$.audio.play`**: having the same ffmpeg output the sound is simpler, and picture and sound naturally run on one clock.
+- **Downloading and reporting watch history with the yt-dlp command line**: it reads the wrong cookie file (see research finding 2), and downloading with cookies is slow.
+- **Detecting the terminal up front from an environment variable (`TERM_PROGRAM`)**: judging from a refused blit is more accurate, and Ghostty inside tmux also falls back correctly.
+- **Storing `$` in a module variable**: validate does not allow it, and the module does not load.
 
-## 相关文件
+## Related files
 
-- [`helper/yt.py`](../helper/yt.py)：推荐流、下载、回传观看记录。
-- [`hooks/register.tsx`](../hooks/register.tsx)、[`hooks/lib.ts`](../hooks/lib.ts)：mod 本体。
-- [`types/index.d.ts`](../types/index.d.ts)：`$.state` 的类型。
-- [`tests/`](../tests/)：`claude plugin test .` 跑的测试。
-- [`probe_reel.py`](./probe_reel.py)：推荐流的探测脚本，已经跑通。原始响应写到 `$TMPDIR/cc-shorts-probe/`，因为里面带账号数据，**不要放进仓库**。
-- [`../.claude/MODULES.md`](../.claude/MODULES.md)：模块清单（feed、player、docs），提交时按模块写 Decision。
+- [`helper/yt.py`](../helper/yt.py): the feed, downloads, and watch-history reports.
+- [`hooks/register.tsx`](../hooks/register.tsx), [`hooks/lib.ts`](../hooks/lib.ts): the mod itself.
+- [`types/index.d.ts`](../types/index.d.ts): the type of `$.state`.
+- [`tests/`](../tests/): the tests `claude plugin test .` runs.
+- [`probe_reel.py`](./probe_reel.py): the feed probe script, working. It writes raw responses to `$TMPDIR/cc-shorts-probe/`; since they hold account data, **keep them out of the repo**.
+- [`../.claude/MODULES.md`](../.claude/MODULES.md): the module list (feed, player, docs); commits write Decisions per module.
 
-## 建议使用的 skills
+## Recommended skills
 
-- **`plugin-authoring`（改 mod 前必须）**：给出这个版本 API 的类型文件和示例，以及 `claude plugin validate`、`claude plugin test`、热重载的用法。
-- **`fable-mind`（建议）**：多步骤、有不少未知数的任务开始前加载。
-- **`code-review` 或 `review-iterate`（改完之后）**：重点检查清理逻辑（ffmpeg 进程、临时文件）和降级逻辑。
-- **`commit-context`（提交时，用户要求才用）**：按 `.claude/MODULES.md` 的模块写 Decision。
+- **`plugin-authoring` (required before changing the mod)**: gives this version's API type files and examples, and how to use `claude plugin validate`, `claude plugin test` and hot reload.
+- **`fable-mind` (recommended)**: load before multi-step tasks with many unknowns.
+- **`code-review` or `review-iterate` (after changes)**: focus on the cleanup logic (ffmpeg processes, temp files) and the fallback logic.
+- **`commit-context` (for commits, only when the user asks)**: write Decisions per module from `.claude/MODULES.md`.

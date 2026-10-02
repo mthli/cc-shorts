@@ -166,28 +166,28 @@ async function play($: EngineInterface, from = 0) {
   stopPlayer()
   let s = await read($, shorts)
   if (s.queue.length <= s.cur) {
-    await setShorts($, s => ({ ...s, status: 'loading', message: '正在获取推荐…' }))
+    await setShorts($, s => ({ ...s, status: 'loading', message: 'Fetching the feed…' }))
     await refill($)
     if (my !== epoch) return
     s = await read($, shorts)
     if (s.queue.length <= s.cur) {
-      await setShorts($, s => ({ ...s, status: 'error', message: '没拿到推荐，按 j 重试' }))
+      await setShorts($, s => ({ ...s, status: 'error', message: 'Could not get the feed; press j to retry' }))
       return
     }
   }
   const id = s.queue[s.cur] ?? ''
   if (s.shorts[id]?.path === undefined) {
-    await setShorts($, s => ({ ...s, status: 'loading', message: '正在下载…' }))
+    await setShorts($, s => ({ ...s, status: 'loading', message: 'Downloading…' }))
   }
   const short = await download($, id)
   if (my !== epoch) return
   if (short?.path === undefined) {
     if (++failures >= 3) {
       failures = 0
-      await setShorts($, s => ({ ...s, status: 'error', message: '连续下载失败，检查网络后按 j 重试' }))
+      await setShorts($, s => ({ ...s, status: 'error', message: 'Downloads keep failing; check the network, then press j to retry' }))
       return
     }
-    $.ui.toast('cc-shorts: 这条下载失败，跳到下一条')
+    $.ui.toast('cc-shorts: download failed, skipping to the next one')
     await setShorts($, s => ({ ...s, cur: s.cur + 1, pos: 0 }))
     return play($)
   }
@@ -259,7 +259,7 @@ async function follow($: EngineInterface, p: Player, short: Short) {
     return
   }
   log($, `ffmpeg ended ${JSON.stringify(ended)}: ${p.stderr}`)
-  await setShorts($, s => ({ ...s, status: 'error', pos: p.pos, message: `播放出错：${lastLine(p.stderr) || '未知原因'}（j 下一条）` }))
+  await setShorts($, s => ({ ...s, status: 'error', pos: p.pos, message: `Playback failed: ${lastLine(p.stderr) || 'unknown reason'} (j for next)` }))
 }
 
 /** The frame file as Raster cells; rejects while it is not written. */
@@ -331,7 +331,7 @@ async function togglePause($: EngineInterface) {
 async function toggleMute($: EngineInterface) {
   const s = await setShorts($, s => ({ ...s, muted: !s.muted }))
   if (player !== undefined) void play($, player.pos)
-  $.ui.toast(s.muted ? 'cc-shorts: 已静音' : 'cc-shorts: 取消静音')
+  $.ui.toast(s.muted ? 'cc-shorts: muted' : 'cc-shorts: unmuted')
 }
 
 /** Stops everything and deletes this session's downloads and frames. */
@@ -357,7 +357,7 @@ export const register: Register = on => {
     const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
     dir = `${tmp}/cc-shorts/${await $.session.id()}`
     python = `${(await $.env.get('HOME')) ?? ''}/.local/pipx/venvs/yt-dlp/bin/python`
-    await $.command.register({ name: 'shorts', description: '在侧边 Pane 刷 YouTube Shorts 推荐流' })
+    await $.command.register({ name: 'shorts', description: 'Scroll your YouTube Shorts feed in a side pane' })
     // Downloads of sessions that ended without cleaning up (a crash).
     void $.process.run(['find', `${tmp}/cc-shorts`, '-mindepth', '1', '-maxdepth', '1', '-type', 'd', '-mtime', '+1', '-exec', 'rm', '-rf', '{}', '+'])
     // After a hot reload: the pane may still be up, its ffmpeg gone.
@@ -399,7 +399,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     if (e.surface !== 'terminal') {
       const { Text } = $.ui.resolve(e)
-      return <Text dimColor>cc-shorts 只能在终端里播放。</Text>
+      return <Text dimColor>cc-shorts plays only in the terminal.</Text>
     }
     const { Box, Text, Button, Image, Raster } = $.ui.resolve(e)
     const s = await read($, shorts)
@@ -417,14 +417,14 @@ export const register: Register = on => {
     } else {
       picture = (
         <Box width={layout.columns} height={layout.rows} alignItems="center" justifyContent="center">
-          <Text dimColor wrap="wrap">{s.message || '按 /shorts 开始'}</Text>
+          <Text dimColor wrap="wrap">{s.message || 'Run /shorts to start'}</Text>
         </Box>
       )
     }
 
     const where = `${clockTime(s.pos)} / ${clockTime(short?.duration ?? 0)}`
     const state = s.status === 'paused' ? `⏸ ${where}` : s.status === 'playing' ? `▶ ${where}` : ''
-    const notes = [state, s.muted ? '静音' : '', s.isLoggedIn ? '' : '未登录，推荐不是你的'].filter(Boolean).join(' · ')
+    const notes = [state, s.muted ? 'muted' : '', s.isLoggedIn ? '' : 'signed out: not your feed'].filter(Boolean).join(' · ')
 
     return (
       <Box flexDirection="column" alignItems="center">
@@ -433,11 +433,11 @@ export const register: Register = on => {
         <Text wrap="truncate">{short?.title ?? ' '}</Text>
         <Text dimColor wrap="truncate">{notes || ' '}</Text>
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button plain hotkey="k" label="上一条" onPress={() => void skip($, -1)} />
-          <Button plain hotkey="p" label={s.status === 'paused' ? '播放' : '暂停'} onPress={() => void togglePause($)} />
-          <Button plain hotkey="j" label="下一条" onPress={() => void skip($, 1)} />
-          <Button plain hotkey="m" label={s.muted ? '取消静音' : '静音'} onPress={() => void toggleMute($)} />
-          <Button plain hotkey="x" label="关闭" onPress={() => void shutDown($).then(() => $.ui.close({ id: PANE }))} />
+          <Button plain hotkey="k" label="Previous" onPress={() => void skip($, -1)} />
+          <Button plain hotkey="p" label={s.status === 'paused' ? 'Play' : 'Pause'} onPress={() => void togglePause($)} />
+          <Button plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
+          <Button plain hotkey="m" label={s.muted ? 'Unmute' : 'Mute'} onPress={() => void toggleMute($)} />
+          <Button plain hotkey="x" label="Close" onPress={() => void shutDown($).then(() => $.ui.close({ id: PANE }))} />
         </Box>
       </Box>
     )
