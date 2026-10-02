@@ -1,7 +1,7 @@
 # Player Decisions
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: player"`
-> Last distilled: 2026-10-03 (HEAD = e3304ae)
+> Last distilled: 2026-10-03 (HEAD = d261cd2)
 
 ## Active
 
@@ -108,6 +108,14 @@
 - **Tradeoffs**: A stale start still pays for its `read` and `mkdir`, `p` while loading now pauses and shows "Paused" instead of a picture, and a press in the milliseconds before a play's first write is not caught.
 - **Watch out**: A new stop path that does not bump `epoch` reopens these races, the write-window guard has no test of its own, and none of it has been tried in a running pane.
 - **Source**: f5d912c, e3304ae
+
+### D14: Pane messages in plain words that name the key to press
+
+- **What**: The feed and playback errors end by naming the key to press ("Press j to retry, or switch browsers with /shorts browser"; "Playback failed (<stderr>). Press j for the next Short"), the off-terminal pane says to run Claude Code in a terminal, and the setup and browser questions lose vague or double-negative wording, while Buttons, status notes and the like and mute toasts stay terse.
+- **Why**: Messages such as "j retries", "(j for next)", "Safari's need Full Disk Access" and "(and deno, which helps)" read as cryptic or vague.
+- **Tradeoffs**: The longer errors wrap over more rows of the 50-column pane, and the tests pin the new wording.
+- **Watch out**: The wrapping is checked only by UI tests, not in a running pane, and the README quotes "Could not get the feed (…)" and "Downloads keep failing", so a later rewording must update it too.
+- **Source**: bcb06b4
 
 ## Superseded
 
