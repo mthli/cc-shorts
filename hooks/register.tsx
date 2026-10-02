@@ -23,6 +23,9 @@ const LOW_WATER = 5
 const SEEN_KEPT = 1000
 /** A Short counts as watched (and goes to the account's history) after this. */
 const WATCHED_SECONDS = 10
+/** The widest key the pane draws (`r: Replay`, `o: Open ↗`), and the space between keys. */
+const KEY_COLUMNS = 9
+const KEY_GAP = 2
 
 const EMPTY: Shorts = {
   queue: [],
@@ -193,6 +196,13 @@ export const register: Register = on => {
     ]
       .filter(Boolean)
       .join(' · ')
+    // Each key in a cell as wide as the widest, so the two rows' columns line
+    // up and a label that changes (Pause to Play) moves nothing.
+    const cell = (key: string, hotkey: string, label: string, onPress: () => void) => (
+      <Box width={KEY_COLUMNS}>
+        <Button key={key} plain hotkey={hotkey} label={label} onPress={onPress} />
+      </Box>
+    )
 
     return (
       <Box flexDirection="column" alignItems="center">
@@ -216,28 +226,18 @@ export const register: Register = on => {
         <Text dimColor wrap="truncate">
           {notes || ' '}
         </Text>
-        {/* Two rows of three: six in one row outgrow the 50 columns asked for. */}
-        <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button key="next" plain hotkey="j" label="Next" onPress={() => void skip($, 1)} />
-          <Button key="previous" plain hotkey="k" label="Prev" onPress={() => void skip($, -1)} />
-          <Button
-            key="pause"
-            plain
-            hotkey="p"
-            label={s.status === 'paused' ? 'Play' : 'Pause'}
-            onPress={() => void togglePause($)}
-          />
+        {/* Two rows of four: eight in one row outgrow the 50 columns asked for. */}
+        <Box flexDirection="row" columnGap={KEY_GAP} flexWrap="wrap">
+          {cell('next', 'j', 'Next', () => void skip($, 1))}
+          {cell('previous', 'k', 'Prev', () => void skip($, -1))}
+          {cell('pause', 'p', s.status === 'paused' ? 'Play' : 'Pause', () => void togglePause($))}
+          {cell('replay', 'r', 'Replay', () => void skip($, 0))}
         </Box>
-        <Box flexDirection="row" columnGap={2} flexWrap="wrap" justifyContent="center">
-          <Button key="like" plain hotkey="l" label={isLiked ? 'Unlike' : 'Like'} onPress={() => void toggleLike($)} />
-          <Button key="mute" plain hotkey="m" label={s.muted ? 'Unmute' : 'Mute'} onPress={() => void toggleMute($)} />
-          <Button
-            key="close"
-            plain
-            hotkey="x"
-            label="Close"
-            onPress={() => void shutDown($).then(() => $.ui.close({ id: PANE }))}
-          />
+        <Box flexDirection="row" columnGap={KEY_GAP} flexWrap="wrap">
+          {cell('like', 'l', isLiked ? 'Unlike' : 'Like', () => void toggleLike($))}
+          {cell('mute', 'm', s.muted ? 'Unmute' : 'Mute', () => void toggleMute($))}
+          {cell('open', 'o', 'Open ↗', () => void (short && openInBrowser($, short.id)))}
+          {cell('close', 'x', 'Close', () => void shutDown($).then(() => $.ui.close({ id: PANE })))}
         </Box>
       </Box>
     )
@@ -525,6 +525,7 @@ async function prepare($: EngineInterface) {
 
 // --- what the keys do --------------------------------------------------------
 
+/** Plays the Short `by` along the queue from the start; 0 plays this one again. */
 async function skip($: EngineInterface, by: number) {
   await setShorts($, s => ({ ...s, cur: Math.min(s.queue.length, Math.max(0, s.cur + by)), pos: 0 }))
   void play($)

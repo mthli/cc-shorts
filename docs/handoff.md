@@ -13,6 +13,8 @@ A Claude Code mod that plays the **YouTube Shorts feed** in a pane beside the te
 | Content source | The user's own YouTube Shorts feed (signed in through Chrome cookies) |
 | When a Short ends | **Play the next one automatically** |
 | Like | **`l` likes or unlikes the Short on screen** (added after v1) |
+| Replay | **`r` plays the Short on screen again from the start** (added after v1) |
+| Open | **`o` pauses and opens the Short on screen in the browser**, as the author does (added after v1) |
 | Not interested / dislike | Not done |
 | How it opens | **Only by hand with `/shorts`**; it does not open on its own at session start |
 | Terminal | Mainly Ghostty (real pixels); **iTerm2 must work too** (character-block fallback) |
@@ -98,7 +100,7 @@ Capabilities and limits that matter to this project:
 
 ```
 /shorts ──► Pane (focus, asks for 50 columns × 40 rows)
-              │  ui.render: Image (Ghostty) or Raster (iTerm2) + author / title / progress + six buttons
+              │  ui.render: Image (Ghostty) or Raster (iTerm2) + author / title / progress + eight buttons
               ▼
   helper/yt.py feed ──► queue of video IDs ──► helper/yt.py download (preloads the next 2) ──► ffmpeg -re
      ▲  token and watched IDs kept in $.store                         │ picture: frame-N.rgb (atomic overwrite)
@@ -131,11 +133,11 @@ How it works:
    - **Pause**: stop ffmpeg and note the position; **resume**: start it again with `-ss <position>`. **Mute** and **a pane size change** also restart ffmpeg at the current position. A video with no audio track outputs no sound at all.
    - **Next Short when one ends**: on `progress=end` with ffmpeg exiting 0, move on to the next; anything else shows an error, and `j` skips.
 4. **Display**:
-   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 6 rows left below for author, a two-row title, progress and two rows of three buttons (`videoBox`; six buttons in one row outgrow the 50 columns `/shorts` asks for).
+   - The picture box is worked out at 9:16, assuming a 1:2 width-to-height character cell, so 8 rows for every 9 columns, with 6 rows left below for author, a two-row title, progress and two rows of four buttons (`videoBox`; eight buttons in one row outgrow the 50 columns `/shorts` asks for). Each button sits in a cell 9 columns wide (the widest, `r: Replay`, `l: Unlike`, `m: Unmute`, `o: Open ↗`) with 2 between, so the two rows' columns line up and a label that changes (Pause to Play) moves nothing. `↗` is an ambiguous-width character: a terminal set to draw those double-width (an iTerm2 option, off by default) pushes the Open cell one column over.
    - It first draws with `Image` and `{ file, format: 'rgb', width, height, generation }`; the frame is about columns × 10 pixels wide, at most 480 (`frameSize`).
    - When `blit` is refused with "draws its alt", record `mode: 'raster'` in `$.state` (Image is not tried again this session) and restart ffmpeg at the current position. In Raster mode ffmpeg outputs small 32-color frames of `columns × (rows × 2)`; the mod reads them with `$.fs.read`, turns them into `▀` blocks, and blits those.
    - A redraw reuses the source or cells of the last successful blit, so the picture does not flash blank.
-5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `l` like / unlike, `m` mute, `x` close. Below the video are the author (a Button: a click in the fullscreen terminal, or Tab then Enter, pauses here and opens the Short in the browser with `open`), the title (two rows), and a status line like "▶ 0:12 / 0:28 · Liked · Muted"; when the last `feed` call was signed out it says "Signed out: not your feed".
+5. **Interaction**: while the pane has focus, `j` next, `k` previous (from the start), `p` pause / resume, `r` replay (the Short on screen, from the start), `l` like / unlike, `m` mute, `o` open, `x` close. Below the video are the author (a Button: a click in the fullscreen terminal, or Tab then Enter, pauses here and opens the Short in the browser with `open`, as `o` does), the title (two rows), and a status line like "▶ 0:12 / 0:28 · Liked · Muted"; when the last `feed` call was signed out it says "Signed out: not your feed".
    - **The input source**: while the pane holds the keyboard it is an English layout, so an input method cannot take the hotkeys. The render hook sees `isFocused` change and runs `ime.py english`, keeping the source it switched away from in `inputSource` in `$.state`; when the pane lets go, `ime.py select` puts that one back. A module variable makes each change act once (the pane draws every second while playing), and the switches go one at a time in a promise chain. An idle pane holds no keyboard: `shutDown` sets idle before the pane closes, and those last draws still say it has focus.
 6. **Likes**: `l` flips the Short's id in `liked` in `$.state` (so a like lasts the session, through a `/clear` too), which the pane shows at once as "Unlike" and "Liked". The flip is read and written inside one `update`, so two presses landing in the same instant (it happens: tmux delivered `l l` as two presses in one millisecond) flip it twice instead of liking twice. The calls to `yt.py like` / `unlike` then go one at a time in a promise chain; when its turn comes, a call whose choice a later press has already overturned is skipped, so pressing `l` several times ends with YouTube on the last choice. A failed call puts the old state back (unless pressed again since) and toasts "like failed".
 7. **Reporting watch history**: when a Short has played to `min(10 seconds, half its length)`, call `yt.py watched` once, at most once per Short (tracked in a module variable, so a hot reload may report one again, which is harmless). Preloading reports nothing.
@@ -153,9 +155,11 @@ How it works:
 
 Verified (2026-10-02):
 
-- 19 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
+- 20 tests (pure functions + UI), `claude plugin validate` and `tsc` all pass.
 - **The input source**: the switch and the way back were tried with a probe mod (see "Input methods take the hotkeys" under research finding 1), and `ime.py` by hand from the shell. `tests/pane.test.tsx` covers switching once per focus change, putting the source back, nothing to put back when it was English already, and the close. In a running pane the user tried it (on Pinyin: into the pane, Esc out, close with `x`) and said the switching "works", without listing each step's result.
 - **Likes against the real account**: `yt.py like` and `yt.py unlike` on one Short, checked with `reel_item_watch` before and after each (see "Likes" under research finding 2). `tests/pane.test.tsx` covers the button, the status line, the call and putting the state back after a failed call; `l` has not yet been pressed in a running pane.
+- **Replay**: `tests/pane.test.tsx` covers the button and that a Short paused partway starts again with `-ss 0.00`, staying on the same Short. `r` has not yet been pressed in a running pane.
+- **Open and the grid of keys**: `tests/pane.test.tsx` covers that `o` runs `open` as the author does. The test harness draws no text, so the columns lining up is worked out from the widths, not yet seen in a running pane, and `o` has not yet been pressed there.
 - **End to end**: ran the whole flow in a Claude Code with `--plugin-dir` inside tmux. tmux does not support image protocols, which happens to cover "Image refused → fall back to Raster": the picture was real color frames, the progress moved, and the next Short played when one ended. `j`/`k`/`p`/`m`/`x` were all pressed; resuming after a pause picked up at the right position; during playback there was always exactly 1 frame file and 3–4 mp4s; `watched` was called after 10 seconds of watching; after `x` and after a hot reload, ffmpeg was confirmed killed and the temp directory deleted. The screen was read with `tmux capture-pane -p` (add `-e` to see colors), and the plugin log with `--debug-file`.
 - **Two hot reloads in a row mid-Short** (in tmux): playback goes on through both, each load writing frames under its own name. Before the load mark in frame names, the second reload restarted ffmpeg on the `frame-1.rgb` the first had left, and ffmpeg exited with `File … already exists`.
 - **`/clear` mid-Short** (in tmux): the same ffmpeg played on and the progress kept moving through the `/clear`; when the Short ended the next one in the queue started on its own; after `/exit`, ffmpeg was gone and the temp directory deleted. `tests/pane.test.tsx` covers the copy and its one-time restore.

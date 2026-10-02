@@ -15,16 +15,16 @@ const PANE = {
 
 const EMPTY = { queue: [], cur: 0, shorts: {}, status: 'idle', message: '', pos: 0, muted: false, isLoggedIn: true }
 
-test('before anything plays: the hint, and the six keys', async $ => {
+test('before anything plays: the hint, and the eight keys', async $ => {
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: 'Run /shorts to start' })).toBeDefined()
-  for (const label of ['Prev', 'Next', 'Pause', 'Like', 'Mute', 'Close']) {
+  for (const label of ['Next', 'Prev', 'Pause', 'Replay', 'Like', 'Mute', 'Open', 'Close']) {
     expect(await ui.find({ type: 'Button', text: label })).toBeDefined()
   }
   await ui.unmount()
 })
 
-test('the author opens the Short in the browser', async ($, on) => {
+test('the author, and Open, open the Short in the browser', async ($, on) => {
   const argvs: (readonly string[])[] = []
   on('process.run', (_, e) => {
     argvs.push(e.argv)
@@ -36,8 +36,46 @@ test('the author opens the Short in the browser', async ($, on) => {
   on('state.get', () => ({ value: { value, version: 1 } }))
   const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Button', text: 'Someone ↗' })).toBeDefined()
+  const opened = () => argvs.filter(argv => argv[0] === 'open')
   await ui.press({ key: 'author' })
-  expect(argvs).toContainEqual(['open', 'https://www.youtube.com/shorts/abc123'])
+  expect(opened()).toEqual([['open', 'https://www.youtube.com/shorts/abc123']])
+  await ui.press({ key: 'open' })
+  expect(opened()).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('replay plays the Short on screen again from the start', async ($, on) => {
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('fs.exists', () => ({ value: true }))
+  // Where the watched ids go.
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  const spawned: (readonly string[])[] = []
+  on('process.spawn', async function* (_, e) {
+    spawned.push(e.argv)
+    return { value: { code: 1, signal: null } }
+  })
+  // The ticker would read frames: held still.
+  mock.clock(on)
+  // Paused 12 s into the second of two Shorts, both downloaded.
+  const one = { id: 'one', title: 'One', author: 'Someone', duration: 30, hasAudio: true, path: '/tmp/one.mp4' }
+  const two = { ...one, id: 'two', title: 'Two', path: '/tmp/two.mp4' }
+  let value: unknown = { ...EMPTY, queue: ['one', 'two'], cur: 1, shorts: { one, two }, status: 'paused', pos: 12 }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'replay' })
+  const ffmpeg = spawned.find(argv => argv[0] === 'ffmpeg') ?? []
+  expect(ffmpeg[ffmpeg.indexOf('-ss') + 1]).toBe('0.00')
+  expect(ffmpeg[ffmpeg.indexOf('-i') + 1]).toBe('/tmp/two.mp4')
+  expect(value).toEqual(expect.objectContaining({ cur: 1 }))
   await ui.unmount()
 })
 
