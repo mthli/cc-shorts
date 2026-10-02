@@ -50,6 +50,11 @@ export type Shorts = {
   frame?: Frame
   /** False when the last feed call came back logged out. */
   isLoggedIn: boolean
+  /**
+   * The input source (macOS) the pane switched away from when it took the
+   * keyboard, put back when it lets go; absent when it switched nothing.
+   */
+  inputSource?: string
 }
 
 declare module 'claude-code' {

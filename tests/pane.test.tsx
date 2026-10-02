@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   component: 'Pane',
@@ -114,6 +114,71 @@ test('what plays outlives a /clear', async ($, on) => {
   await $.classic.SessionStart({ source: 'clear' })
   expect(await isMuted()).toBe(false)
   await ui.unmount()
+})
+
+test('an input method is kept off the hotkeys while the pane holds the keyboard', async ($, on) => {
+  const PINYIN = 'com.apple.inputmethod.SCIM.ITABC'
+  let was: string | null = PINYIN
+  const imeCalls: (readonly string[])[] = []
+  on('process.run', (_, e) => {
+    const at = e.argv.findIndex(arg => arg.endsWith('/helper/ime.py'))
+    if (at >= 0) imeCalls.push(e.argv.slice(at + 1))
+    const stdout = e.argv.includes('english') ? JSON.stringify({ was }) : '{}'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const draw = (isFocused: boolean) =>
+    $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE, props: { ...PANE.props, isFocused } })
+  // The switch runs on after the draw returns, unawaited.
+  const { settle } = mock.clock(on)
+  // Paused on one Short: an idle pane is one closing, and holds no keyboard.
+  const short = { id: 'abc123', title: 'A title', author: 'Someone', duration: 30, hasAudio: true }
+  let value: unknown = { ...EMPTY, queue: [short.id], shorts: { [short.id]: short }, status: 'paused' }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  // What `session.start` asks of the session, for the helper's path; the
+  // pane is up, so nothing is shut down.
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'a-session' }))
+  on('command.register', () => ({ value: { command: 'shorts' } }))
+  const pane = { id: 'shorts', title: 'Shorts', isShown: true, isFocused: true, isPlaced: true }
+  on('ui.panes', () => ({ value: [pane] }))
+  on('ui.close', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  let ui = await draw(true)
+  await settle()
+  await ui.unmount()
+  // Drawn again with the keyboard still held: no second switch.
+  ui = await draw(true)
+  await ui.unmount()
+  ui = await draw(false)
+  await settle()
+  await ui.unmount()
+  expect(imeCalls).toEqual([['english'], ['select', PINYIN]])
+
+  // English already: nothing switched, so nothing to put back.
+  was = null
+  ui = await draw(true)
+  await settle()
+  await ui.unmount()
+  ui = await draw(false)
+  await settle()
+  await ui.unmount()
+  expect(imeCalls).toHaveLength(3)
+
+  // Closed while it holds the keyboard: no draw sees it go, the close gives it back.
+  was = PINYIN
+  ui = await draw(true)
+  await settle()
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+  expect(imeCalls.slice(3)).toEqual([['english'], ['select', PINYIN]])
 })
 
 test('off the terminal it says so instead of drawing a player', async $ => {

@@ -80,23 +80,27 @@ const downloads = new Map<string, Promise<Short | undefined>>()
 const marked = new Set<string>()
 /** What `shorts` held when a /clear began, for the session after it. */
 let carried: Shorts | undefined
+/** Whether the pane held the keyboard at its last draw: each change acts once. */
+let hadKeys = false
+let keysChain: Promise<unknown> = Promise.resolve()
 
 const log = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 const setShorts = ($: EngineInterface, change: (s: Shorts) => Shorts) => update($, shorts, change)
 
-/** Runs `helper/yt.py` and parses the JSON it prints; undefined on failure. */
+/** Runs a script of `helper/` and parses the JSON it prints; undefined on failure. */
 async function helper<T>(
   $: EngineInterface,
+  script: 'yt.py' | 'ime.py',
   args: string[],
   stdin: string | undefined,
   timeoutMs: number,
 ): Promise<T | undefined> {
   try {
-    const run = await $.process.run([python, '-B', `${$.plugin.root}/helper/yt.py`, ...args], { stdin, timeoutMs })
+    const run = await $.process.run([python, '-B', `${$.plugin.root}/helper/${script}`, ...args], { stdin, timeoutMs })
     if (run.exitCode === 0) return JSON.parse(lastLine(run.stdout)) as T
-    log($, `yt.py ${args[0]} failed: ${lastLine(run.stderr)}`)
+    log($, `${script} ${args[0]} failed: ${lastLine(run.stderr)}`)
   } catch (err) {
-    log($, `yt.py ${args[0]} failed: ${String(err)}`)
+    log($, `${script} ${args[0]} failed: ${String(err)}`)
   }
   return undefined
 }
@@ -119,6 +123,9 @@ export const register: Register = on => {
     // After a hot reload: the pane may still be up, its ffmpeg gone.
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     const s = await read($, shorts)
+    // A source still kept means the last load switched it and never gave it back.
+    hadKeys = s.inputSource !== undefined
+    if (!isOpen) void holdKeys($, false)
     if (isOpen && (s.status === 'playing' || s.status === 'loading')) void play($, s.pos)
     else if (isOpen && s.status === 'paused' && s.mode === 'raster' && s.frame) {
       // The cells on screen went with the old module; the paused frame's
@@ -148,6 +155,10 @@ export const register: Register = on => {
     }
     const { Box, Text, Button, Image, Raster } = $.ui.resolve(e)
     const s = await read($, shorts)
+    // The draw is the first to see the keyboard come or go (the person's
+    // ctrl+x tab, a click, Esc); the switch runs on after it returns. Idle is
+    // a pane closing (`shutDown`), whose last draws still hold the keyboard.
+    void holdKeys($, e.props.isFocused && s.status !== 'idle')
     layout = videoBox(e.props.bodyColumns, e.props.scroll.bodyRows)
     const short = s.shorts[s.queue[s.cur] ?? '']
     const f = s.frame
@@ -249,6 +260,7 @@ export const register: Register = on => {
     }
     epoch++
     stopPlayer()
+    await holdKeys($, false)
     if (dir !== '') await $.process.run(['rm', '-rf', dir], { timeoutMs: 2000 }).catch(() => undefined)
     return next(e)
   })
@@ -399,7 +411,7 @@ async function follow($: EngineInterface, p: Player, short: Short) {
       }
       if (!marked.has(p.id) && p.pos >= Math.min(WATCHED_SECONDS, short.duration / 2)) {
         marked.add(p.id)
-        void helper($, ['watched', p.id], undefined, 60_000)
+        void helper($, 'yt.py', ['watched', p.id], undefined, 60_000)
       }
     }
   } catch (err) {
@@ -445,7 +457,7 @@ function refill($: EngineInterface): Promise<void> {
     const token = await $.store.get('token')
     const seen = ((await $.store.get('seen')) as string[] | undefined) ?? []
     const request = { token: typeof token === 'string' ? token : null, seen: [...seen, ...s.queue], want: 10 }
-    const reply = await helper<FeedReply>($, ['feed'], JSON.stringify(request), 120_000)
+    const reply = await helper<FeedReply>($, 'yt.py', ['feed'], JSON.stringify(request), 120_000)
     if (reply === undefined) return
     log($, `feed: ${reply.ids.length} from ${reply.source}`)
     if (reply.token === null) await $.store.delete('token')
@@ -476,7 +488,7 @@ function download($: EngineInterface, id: string): Promise<Short | undefined> {
     try {
       const had = (await read($, shorts)).shorts[id]
       if (had?.path !== undefined && (await $.fs.exists(had.path))) return had
-      const short = await helper<Short>($, ['download', id, dir], undefined, 180_000)
+      const short = await helper<Short>($, 'yt.py', ['download', id, dir], undefined, 180_000)
       if (short === undefined) return undefined
       await setShorts($, s => ({ ...s, shorts: { ...s.shorts, [id]: short } }))
       return short
@@ -561,7 +573,7 @@ async function toggleLike($: EngineInterface) {
     .then(async () => {
       // Pressed again since: that press sends its own.
       if (hasLike(await read($, shorts), id) !== isLiked) return
-      if ((await helper($, [isLiked ? 'like' : 'unlike', id], undefined, 60_000)) !== undefined) return
+      if ((await helper($, 'yt.py', [isLiked ? 'like' : 'unlike', id], undefined, 60_000)) !== undefined) return
       await setShorts($, s => (hasLike(s, id) === isLiked ? { ...s, liked: withLike(s.liked, id, !isLiked) } : s))
       $.ui.toast(`cc-shorts: ${isLiked ? 'like' : 'unlike'} failed`)
     })
@@ -587,5 +599,41 @@ async function shutDown($: EngineInterface) {
     frame: undefined,
     shorts: Object.fromEntries(Object.entries(s.shorts).map(([id, short]) => [id, { ...short, path: undefined }])),
   }))
+  // No draw sees the keyboard go: an idle pane holds none, a closed one draws no more.
+  await holdKeys($, false)
   if (dir !== '') await $.process.run(['rm', '-rf', dir])
+}
+
+// --- the input source --------------------------------------------------------
+
+/**
+ * Keeps an input method off the hotkeys: a Chinese or Japanese one takes the
+ * letters before the terminal sees them. While the pane holds the keyboard
+ * the input source is an English layout, and the one it had comes back once
+ * the pane lets go; one switch at a time, in order.
+ */
+function holdKeys($: EngineInterface, isHeld: boolean): Promise<unknown> {
+  // Drawn before `session.start` named the helper's Python (a hot reload):
+  // a later draw acts on it.
+  if (isHeld !== hadKeys && python !== '') {
+    hadKeys = isHeld
+    keysChain = keysChain
+      .then(() => (isHeld ? toEnglish($) : giveBackInput($)))
+      .catch(err => log($, `input source: ${String(err)}`))
+  }
+  return keysChain
+}
+
+async function toEnglish($: EngineInterface) {
+  const reply = await helper<{ was: string | null }>($, 'ime.py', ['english'], undefined, 5000)
+  const was = reply?.was
+  // Nothing switched (English already): a source kept from before stays.
+  if (typeof was === 'string') await setShorts($, s => ({ ...s, inputSource: was }))
+}
+
+async function giveBackInput($: EngineInterface) {
+  const { inputSource } = await read($, shorts)
+  if (inputSource === undefined) return
+  await helper($, 'ime.py', ['select', inputSource], undefined, 5000)
+  await setShorts($, s => ({ ...s, inputSource: undefined }))
 }
