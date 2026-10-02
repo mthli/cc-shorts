@@ -362,6 +362,44 @@ test('replay plays the Short on screen again from the start', async ($, on) => {
   await ui.unmount()
 })
 
+test('a skip while ffmpeg is still starting: only the Short skipped to plays', async ($, on) => {
+  const clock = mock.clock(on)
+  // The first `mkdir` takes a second of the mocked clock: the skip lands while it runs.
+  let mkdirs = 0
+  on('process.run', async (_, e) => {
+    if (e.argv[0] === 'mkdir' && ++mkdirs === 1) await clock.sleep(1000)
+    return ran(0)
+  })
+  on('fs.exists', () => ({ value: true }))
+  mock.store(on)
+  const spawned: (readonly string[])[] = []
+  on('process.spawn', async function* (_, e) {
+    spawned.push(e.argv)
+    return { value: { code: 1, signal: null } }
+  })
+  // Paused on the first of two Shorts, both downloaded.
+  const one = { id: 'one', title: 'One', author: 'Someone', duration: 30, hasAudio: true, path: '/tmp/one.mp4' }
+  const two = { ...one, id: 'two', title: 'Two', path: '/tmp/two.mp4' }
+  let value: unknown = { ...EMPTY, queue: ['one', 'two'], shorts: { one, two }, status: 'paused', pos: 3 }
+  let version = 1
+  on('state.get', () => ({ value: { value, version } }))
+  on('state.set', (_, e) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    value = e.value
+    return { value: { isSet: true, version: ++version } }
+  })
+  const ui = await $.ui.mount({ plugin: 'cc-shorts', surface: 'terminal', ...PANE })
+
+  // Play, then on to the next while the first ffmpeg is not spawned yet.
+  await ui.press({ key: 'pause' })
+  await ui.press({ key: 'next' })
+  await clock.advance(1000)
+  const inputs = spawned.filter(argv => argv[0] === 'ffmpeg').map(argv => argv[argv.indexOf('-i') + 1])
+  expect(inputs).toEqual(['/tmp/two.mp4'])
+  expect(value).toEqual(expect.objectContaining({ cur: 1 }))
+  await ui.unmount()
+})
+
 test('likes: shown at once, put back when refused, every press counted', async ($, on) => {
   const argvs: (readonly string[])[] = []
   let exitCode = 0

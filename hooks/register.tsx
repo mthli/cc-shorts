@@ -498,6 +498,9 @@ async function start($: EngineInterface, short: Short, from: number, my: number)
   const mode = s.mode ?? 'image'
   const box = layout ?? videoBox(50, 40)
   await $.process.run(['mkdir', '-p', dir])
+  // Skipped on while this waited: an ffmpeg spawned now would have nothing
+  // left to stop it, so the newer play spawns its own.
+  if (my !== epoch) return
   const name = `frame-${loadMark}-${++frameSeq}.rgb`
   const frame: Frame = { file: `${dir}/${name}`, ...frameSize(mode, box), ...box }
   const argv = ffmpegArgs({ path: short.path ?? '', start: from, mode, frame, isMuted: s.muted || !short.hasAudio })
@@ -508,7 +511,10 @@ async function start($: EngineInterface, short: Short, from: number, my: number)
   void $.process.run(['find', dir, '-name', 'frame-*', '!', '-name', `${name}*`, '-delete'])
   lastSource = undefined
   lastCells = undefined
-  await setShorts($, s => ({ ...s, status: 'playing', message: '', pos: from, frame }))
+  // Stopped while this writes: a retried write would draw over the newer one,
+  // and the ticker would outlive the stop that already ran.
+  await setShorts($, s => (my === epoch ? { ...s, status: 'playing', message: '', pos: from, frame } : s))
+  if (my !== epoch) return
   void markSeen($, short.id)
   ticker = $.clock.every(33, () => void tick($))
   void follow($, p, short)

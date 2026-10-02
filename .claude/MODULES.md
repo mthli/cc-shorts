@@ -2,6 +2,6 @@
 
 ## Structural modules
 
-- `feed` — helper/yt.py: the logged-in Shorts feed, downloads and watch history, through yt-dlp
-- `player` — the mod itself (.claude-plugin/, hooks/, types/, tests/, helper/ime.py): the /shorts pane, ffmpeg playback, Image and Raster drawing, keys and the input source, cleanup
-- `docs` — docs/: research notes, the handoff and probe scripts
+- `feed` — helper/yt.py: the logged-in Shorts feed, downloads, watch history and likes, through yt-dlp
+- `player` — the mod itself (.claude-plugin/, hooks/, types/, tests/, helper/ime.py): setup and the browser choice, the /shorts pane, the feed queue and downloads, ffmpeg playback, Image and Raster drawing, keys and the input source, cleanup
+- `docs` — docs/: the handoff (design, research, status) and the feed probe script
